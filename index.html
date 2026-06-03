@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>goblingames — Acki Nacki desktop miner</title>
+    <meta name="description" content="goblingames — mine Acki Nacki directly from your own PC. Free desktop miner for Windows (Android coming soon)." />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <meta property="og:title" content="goblingames — Acki Nacki desktop miner" />
+    <meta property="og:description" content="Mine Acki Nacki directly from your own PC. Free desktop miner." />
+    <meta property="og:type" content="website" />
+    <style>
+      :root {
+        --gold: #d4a54a;
+        --gold-light: #f0d890;
+        --gold-dim: #a89060;
+        --brown-deep: #3d2817;
+        --brown-fill: #2a2018;
+        --brown-fill-low: #1a1410;
+        --green-deep: #1a3d2e;
+        --red: #8b2a1f;
+        --red-deep: #5a1a13;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+        background: radial-gradient(ellipse at center, var(--green-deep) 0%, #0a1410 60%, #000 100%);
+        color: var(--gold-light);
+        font-family: Georgia, 'Times New Roman', serif;
+      }
+      .panel {
+        width: min(480px, 100%);
+        background: linear-gradient(180deg, var(--brown-fill) 0%, var(--brown-fill-low) 100%);
+        border: 2px solid var(--brown-deep);
+        border-radius: 10px;
+        box-shadow:
+          inset 0 0 30px rgba(0, 0, 0, 0.7),
+          0 0 30px rgba(212, 165, 74, 0.15),
+          0 10px 30px rgba(0, 0, 0, 0.6);
+        padding: 36px 32px 28px;
+        text-align: center;
+      }
+      .logo {
+        width: 96px;
+        height: 96px;
+        border-radius: 18px;
+        filter: drop-shadow(0 0 14px rgba(212, 165, 74, 0.5));
+      }
+      h1 {
+        margin: 14px 0 2px;
+        font-size: 2.4rem;
+        letter-spacing: 0.04em;
+        color: var(--gold);
+        text-shadow: 0 0 14px rgba(212, 165, 74, 0.55), 0 2px 4px rgba(0, 0, 0, 0.8);
+      }
+      .tagline {
+        margin: 0 0 22px;
+        font-size: 0.8rem;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: var(--gold-dim);
+      }
+      .blurb {
+        margin: 0 auto 26px;
+        max-width: 360px;
+        font-size: 0.95rem;
+        line-height: 1.55;
+        color: var(--gold-light);
+      }
+      .btn {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 14px 18px;
+        margin: 0 auto 12px;
+        border-radius: 8px;
+        font-family: inherit;
+        font-size: 1.05rem;
+        font-weight: bold;
+        letter-spacing: 0.04em;
+        text-decoration: none;
+        cursor: pointer;
+        transition: transform 0.15s, box-shadow 0.2s;
+      }
+      .btn-download {
+        background: linear-gradient(180deg, var(--red) 0%, var(--red-deep) 100%);
+        border: 1px solid var(--gold);
+        color: var(--gold-light);
+        text-shadow: 0 0 6px rgba(240, 216, 144, 0.5);
+        box-shadow: 0 0 14px rgba(139, 42, 31, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      }
+      .btn-download:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(139, 42, 31, 0.8);
+      }
+      .btn-meta {
+        margin: -4px 0 22px;
+        font-size: 0.78rem;
+        color: var(--gold-dim);
+        font-family: 'Courier New', monospace;
+      }
+      .btn-soon {
+        background: linear-gradient(180deg, var(--brown-fill) 0%, var(--brown-fill-low) 100%);
+        border: 1px dashed var(--brown-deep);
+        color: var(--gold-dim);
+        opacity: 0.7;
+        cursor: not-allowed;
+      }
+      details.note {
+        margin: 8px auto 0;
+        max-width: 380px;
+        text-align: left;
+        font-size: 0.82rem;
+        color: var(--gold-dim);
+        background: rgba(0, 0, 0, 0.22);
+        border: 1px solid rgba(212, 165, 74, 0.18);
+        border-radius: 6px;
+        padding: 8px 12px;
+      }
+      details.note summary {
+        cursor: pointer;
+        color: var(--gold);
+        list-style: none;
+      }
+      details.note summary::-webkit-details-marker { display: none; }
+      details.note p { margin: 8px 0 0; line-height: 1.5; }
+      details.note code {
+        color: var(--gold-light);
+        background: rgba(212, 165, 74, 0.1);
+        padding: 1px 5px;
+        border-radius: 3px;
+      }
+      footer {
+        margin-top: 26px;
+        font-size: 0.78rem;
+        color: var(--gold-dim);
+      }
+      footer a { color: var(--gold); text-decoration: none; }
+      footer a:hover { text-decoration: underline; }
+      @media (max-width: 480px) {
+        .panel { padding: 28px 20px 22px; }
+        h1 { font-size: 2rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="panel">
+      <img class="logo" src="logo.png" alt="goblingames logo" />
+      <h1>goblingames</h1>
+      <p class="tagline">Acki Nacki blockchain mining</p>
+
+      <p class="blurb">
+        Mine Acki Nacki directly from your own PC — a free desktop miner.
+        Connect your AN Wallet, press Auto&nbsp;Mine, and let it run.
+      </p>
+
+      <a class="btn btn-download"
+         href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-windows-setup.exe">
+        ⬇ Download for Windows
+      </a>
+      <p class="btn-meta">v0.8.9 · Windows 10/11 · ~18&nbsp;MB</p>
+
+      <button class="btn btn-soon" type="button" disabled>📱 Android — coming soon</button>
+
+      <details class="note">
+        <summary>⚠ Windows says "unrecognized app"?</summary>
+        <p>
+          That is normal — the app is not code-signed yet. Click
+          <code>More info</code> → <code>Run anyway</code>. It is the same
+          installer you downloaded from this page.
+        </p>
+      </details>
+
+      <footer>
+        Open downloads ·
+        <a href="https://github.com/andresCadavidT/goblingames/releases">All releases</a>
+        ·
+        <a href="https://github.com/andresCadavidT/goblingames">GitHub</a>
+      </footer>
+    </main>
+  </body>
+</html>
