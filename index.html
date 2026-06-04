@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>goblingames — Acki Nacki desktop miner</title>
-    <meta name="description" content="goblingames — mine Acki Nacki directly from your own PC. Free desktop miner for Windows (Android coming soon)." />
+    <meta name="description" content="goblingames — mine Acki Nacki directly from your own device. Free miner for Windows and Android." />
     <link rel="icon" type="image/png" href="favicon.png" />
     <meta property="og:title" content="goblingames — Acki Nacki desktop miner" />
     <meta property="og:description" content="Mine Acki Nacki directly from your own PC. Free desktop miner." />
@@ -96,12 +96,16 @@
         color: var(--gold-dim);
         font-family: 'Courier New', monospace;
       }
-      .btn-soon {
-        background: linear-gradient(180deg, var(--brown-fill) 0%, var(--brown-fill-low) 100%);
-        border: 1px dashed var(--brown-deep);
-        color: var(--gold-dim);
-        opacity: 0.7;
-        cursor: not-allowed;
+      .btn-android {
+        background: linear-gradient(180deg, #1f6b4a 0%, #14402e 100%);
+        border: 1px solid var(--gold);
+        color: var(--gold-light);
+        text-shadow: 0 0 6px rgba(240, 216, 144, 0.5);
+        box-shadow: 0 0 14px rgba(26, 61, 46, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      }
+      .btn-android:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(31, 107, 74, 0.8);
       }
       details.note {
         margin: 8px auto 0;
@@ -152,14 +156,19 @@
       </a>
       <p class="btn-meta">v0.8.9 · Windows 10/11 · ~18&nbsp;MB</p>
 
-      <button class="btn btn-soon" type="button" disabled>📱 Android — coming soon</button>
+      <a class="btn btn-android"
+         href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-android.apk">
+        📱 Download for Android
+      </a>
+      <p class="btn-meta">v0.8.9 · Android 7+ · ~24&nbsp;MB</p>
 
       <details class="note">
-        <summary>⚠ Windows says "unrecognized app"?</summary>
+        <summary>⚠ "Unrecognized app" / "unknown sources"?</summary>
         <p>
-          That is normal — the app is not code-signed yet. Click
-          <code>More info</code> → <code>Run anyway</code>. It is the same
-          installer you downloaded from this page.
+          That is normal — the app is not code-signed yet.
+          On <strong>Windows</strong>: <code>More info</code> → <code>Run anyway</code>.
+          On <strong>Android</strong>: allow <code>install unknown apps</code> for your
+          browser or Files, then tap the APK. Same file you downloaded here.
         </p>
       </details>
 
