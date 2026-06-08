@@ -1,6 +1,6 @@
 {
   "minimum": "0.4.15",
-  "latest": "0.9.0",
+  "latest": "0.9.1",
   "downloadUrl": "https://goblingames.app",
-  "reason": "Please update to the latest version from goblingames.app."
+  "reason": "Background miner windows now keep mining and auto-resume after era changes. Update from goblingames.app."
 }
