@@ -1,6 +1,6 @@
 {
   "minimum": "0.4.15",
-  "latest": "0.9.1",
+  "latest": "1.0.0",
   "downloadUrl": "https://goblingames.app",
-  "reason": "Background miner windows now keep mining and auto-resume after era changes. Update from goblingames.app."
+  "reason": "v1.0.0 - first public release. Fixes Android mining (session submit) and reward history. Download the new installer from goblingames.app."
 }
