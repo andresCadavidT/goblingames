@@ -1,6 +1,6 @@
 {
-  "minimum": "0.4.15",
-  "latest": "1.0.0",
+  "minimum": "1.1.9",
+  "latest": "1.1.12",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.0.0 - first public release. Fixes Android mining (session submit) and reward history. Download the new installer from goblingames.app."
+  "reason": "v1.1.12 - the earnings history follows every accepted session, the loop no longer stalls with the screen off, sends every 3 s for a whole epoch. Builds before 1.1.9 must update."
 }
