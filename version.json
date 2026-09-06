@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.1.12",
+  "latest": "1.1.13",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.1.12 - the earnings history follows every accepted session, the loop no longer stalls with the screen off, sends every 3 s for a whole epoch. Builds before 1.1.9 must update."
+  "reason": "v1.1.13 - the phone restores and keeps mining on its own after Android restarts the app, the foreground service no longer expires after six hours on Android 14+, the panel warns when battery optimisation can freeze mining, the music row clears the navigation bar, and New account opens its window on Windows again. Builds before 1.1.9 must update."
 }
