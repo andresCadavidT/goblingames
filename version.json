@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.1.14",
+  "latest": "1.1.15",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.1.14 - the daily pause no longer traps a miner that was idle across the day boundary: the contract's tap counter only resets when a message arrives, so a stale 12000 now means mine, not wait. Builds before 1.1.9 must update."
+  "reason": "v1.1.15 - the miner now mines with the complexity pair the contract's verifier actually uses, so sessions land again after the network changes it (2026-10-15: hard 11 -> 19, six hours of correctTap=0). Also: the app now tells you when a new version is out. Builds before 1.1.9 must update."
 }
