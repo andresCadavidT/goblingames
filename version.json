@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.1.15",
+  "latest": "1.1.16",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.1.15 - the miner now mines with the complexity pair the contract's verifier actually uses, so sessions land again after the network changes it (2026-10-15: hard 11 -> 19, six hours of correctTap=0). Also: the app now tells you when a new version is out. Builds before 1.1.9 must update."
+  "reason": "v1.1.16 - Android background mining now runs in the foreground-service process, not in the WebView: the loop keeps starting sessions with the screen off instead of waiting for the page to wake. Also: clearing the support log keeps the device/battery/service diagnostics, and Doze/OEM battery allow-listing is still required. Builds before 1.1.9 must update."
 }
