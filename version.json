@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.1.16",
+  "latest": "1.1.17",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.1.16 - Android background mining now runs in the foreground-service process, not in the WebView: the loop keeps starting sessions with the screen off instead of waiting for the page to wake. Also: clearing the support log keeps the device/battery/service diagnostics, and Doze/OEM battery allow-listing is still required. Builds before 1.1.9 must update."
+  "reason": "v1.1.17 - A stuck commit slot can no longer pin the miner: the clear samples the queue once, presses one send per retry with a 3/10/20/40/60/120 s backoff, and stops after 30 minutes with a visible node-congested status instead of hammering for hours. A 402 stops and raises KEYS INVALIDATED, a 409 stops with the wallet-cap reason, a 419 waits for the epoch roll, and a 410 in the SDK's Number(410) shape releases the latch. The clear's fatal verdict now logs its exit code, and the hourly summary includes the stuck time in progress. Minimum stays 1.1.9."
 }
