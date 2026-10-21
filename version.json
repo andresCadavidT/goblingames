@@ -1,7 +1,6 @@
 {
   "minimum": "1.1.9",
   "latest": "1.1.18",
-  "beeSdk": "6.0.0",
   "downloadUrl": "https://goblingames.app",
   "reason": "v1.1.18 - 1.1.17 stopped the miner after 30 minutes of a congested commit slot and required pressing Mine. That was a regression. The loop now retries automatically: it keeps resending the session's proof every three seconds while the slot's seed is unchanged, and only a rejected proof or a rotated seed falls through to the clear. The clear presses one send every three seconds indefinitely (the first round still samples with five) and never stops for congestion. A 402 stops and raises KEYS INVALIDATED, a 409 stops with the wallet-cap reason, and a 419 waits for the epoch roll. Minimum stays 1.1.9."
 }
