@@ -4,6 +4,14 @@
   "note": "Beta builds are listed here and on the site's Beta tab only. The app reads version.json (stable), so it never suggests one of these.",
   "builds": [
     {
+      "version": "1.2.4",
+      "date": "2026-10-23",
+      "beta": true,
+      "notes": "Beta build; the app will not offer it as an update. - **Per-attempt delivery diagnostics.** Every send now leaves its code and its   elapsed time in the tally line, the same shape as Cappa's   DELIVERY DIAGNOSTIC … elapsed_ms=95 code=621:",
+      "windows": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.4-beta/goblingames-windows-setup.exe",
+      "android": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.4-beta/goblingames-android.apk"
+    },
+    {
       "version": "1.2.3",
       "date": "2026-10-23",
       "beta": true,
