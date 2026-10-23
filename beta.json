@@ -2,5 +2,14 @@
   "channel": "beta",
   "updatedAt": "2026-10-22",
   "note": "Beta builds are listed here and on the site's Beta tab only. The app reads version.json (stable), so it never suggests one of these.",
-  "builds": []
+  "builds": [
+    {
+      "version": "1.2.1",
+      "date": "2026-10-22",
+      "beta": true,
+      "notes": "First build on the 1.2.0 engine. The earnings panel sees the balance again: when the wallet's multifactor buckets come back empty the app reads the account's own balance, so TODAY/LAST/RATE and the claim history stop sitting at zero while the chain pays.",
+      "windows": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.1-beta/goblingames-windows-setup.exe",
+      "android": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.1-beta/goblingames-android.apk"
+    }
+  ]
 }
