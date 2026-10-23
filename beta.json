@@ -1,0 +1,6 @@
+{
+  "channel": "beta",
+  "updatedAt": "2026-10-22",
+  "note": "Beta builds are listed here and on the site's Beta tab only. The app reads version.json (stable), so it never suggests one of these.",
+  "builds": []
+}

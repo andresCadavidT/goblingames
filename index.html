@@ -59,12 +59,40 @@
         text-shadow: 0 0 14px rgba(212, 165, 74, 0.55), 0 2px 4px rgba(0, 0, 0, 0.8);
       }
       .tagline {
-        margin: 14px 0 26px;
+        margin: 14px 0 18px;
         font-size: 0.8rem;
         letter-spacing: 0.28em;
         text-transform: uppercase;
         color: var(--gold-dim);
       }
+      /* Stable / Beta switch */
+      .tabs {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        margin: 0 0 22px;
+      }
+      .tab {
+        padding: 6px 18px;
+        border-radius: 6px;
+        border: 1px solid rgba(212, 165, 74, 0.35);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--gold-dim);
+        font-family: inherit;
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+      .tab:hover { color: var(--gold-light); border-color: var(--gold); }
+      .tab[aria-selected='true'] {
+        color: var(--brown-fill-low);
+        background: linear-gradient(180deg, var(--gold-light) 0%, var(--gold) 100%);
+        border-color: var(--gold-light);
+        font-weight: bold;
+      }
+      [role='tabpanel'][hidden] { display: none; }
       .btn {
         display: inline-block;
         box-sizing: border-box;
@@ -107,6 +135,15 @@
         transform: translateY(-2px);
         box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(31, 107, 74, 0.8);
       }
+      .btn-ghost {
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid rgba(212, 165, 74, 0.4);
+        color: var(--gold-light);
+        font-size: 0.8rem;
+        padding: 6px 14px;
+        margin: 4px 4px 0;
+      }
+      .btn-ghost:hover { border-color: var(--gold); transform: translateY(-1px); }
       details.note {
         margin: 8px auto 0;
         max-width: 380px;
@@ -131,6 +168,47 @@
         padding: 1px 5px;
         border-radius: 3px;
       }
+      /* Beta list */
+      .beta-intro {
+        margin: 0 0 16px;
+        font-size: 0.82rem;
+        line-height: 1.5;
+        color: var(--gold-dim);
+      }
+      .beta-card {
+        text-align: left;
+        margin: 0 0 12px;
+        padding: 12px 14px;
+        border-radius: 7px;
+        border: 1px solid rgba(212, 165, 74, 0.22);
+        background: rgba(0, 0, 0, 0.25);
+      }
+      .beta-card h3 {
+        margin: 0 0 2px;
+        font-size: 1rem;
+        color: var(--gold);
+        letter-spacing: 0.03em;
+      }
+      .beta-date {
+        font-size: 0.74rem;
+        font-family: 'Courier New', monospace;
+        color: var(--gold-dim);
+        margin-bottom: 6px;
+      }
+      .beta-notes {
+        margin: 0 0 10px;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        color: var(--gold-dim);
+        white-space: pre-line;
+      }
+      .beta-empty {
+        padding: 18px 8px;
+        font-size: 0.84rem;
+        color: var(--gold-dim);
+        border: 1px dashed rgba(212, 165, 74, 0.25);
+        border-radius: 7px;
+      }
       footer {
         margin-top: 26px;
         font-size: 0.78rem;
@@ -150,45 +228,65 @@
       <h1>goblingames</h1>
       <p class="tagline">Acki Nacki blockchain mining</p>
 
-      <a class="btn btn-download"
-         href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-windows-setup.exe">
-        ⬇ Download for Windows
-      </a>
-      <p class="btn-meta">v1.1.18 · Windows 10/11 · ~26&nbsp;MB</p>
+      <div class="tabs" role="tablist" aria-label="Release channel">
+        <button class="tab" id="tab-stable" role="tab" aria-selected="true" aria-controls="stable">Stable</button>
+        <button class="tab" id="tab-beta" role="tab" aria-selected="false" aria-controls="beta">Beta</button>
+      </div>
 
-      <a class="btn btn-android"
-         href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-android.apk">
-        📱 Download for Android
-      </a>
-      <p class="btn-meta">v1.1.18 · Android 7+ · ~57&nbsp;MB</p>
+      <!-- Stable: what every installed app is offered. -->
+      <section id="stable" role="tabpanel" aria-labelledby="tab-stable">
+        <a class="btn btn-download"
+           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-windows-setup.exe">
+          ⬇ Download for Windows
+        </a>
+        <p class="btn-meta">v1.2.0 · Windows 10/11 · ~26&nbsp;MB</p>
 
-      <details class="note">
-        <summary>⚠ "Unrecognized app" / "unknown sources"?</summary>
-        <p>
-          That is normal — the app is not code-signed yet.
-          On <strong>Windows</strong>: <code>More info</code> → <code>Run anyway</code>.
-          On <strong>Android</strong>: allow <code>install unknown apps</code> for your
-          browser or Files, then tap the APK. Same file you downloaded here.
-        </p>
-      </details>
+        <a class="btn btn-android"
+           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-android.apk">
+          📱 Download for Android
+        </a>
+        <p class="btn-meta">v1.2.0 · Android 7+ · ~57&nbsp;MB</p>
 
-      <details class="note">
-        <summary>🔋 Mining stops when the screen is off?</summary>
-        <p>
-          Android freezes background apps it is allowed to freeze, and a frozen
-          app cannot mine. Let goblingames run without battery restrictions:
-          <strong>Settings → Apps → goblingames → Battery → Unrestricted</strong>.
+        <details class="note">
+          <summary>⚠ "Unrecognized app" / "unknown sources"?</summary>
+          <p>
+            That is normal — the app is not code-signed yet.
+            On <strong>Windows</strong>: <code>More info</code> → <code>Run anyway</code>.
+            On <strong>Android</strong>: allow <code>install unknown apps</code> for your
+            browser or Files, then tap the APK. Same file you downloaded here.
+          </p>
+        </details>
+
+        <details class="note">
+          <summary>🔋 Mining stops when the screen is off?</summary>
+          <p>
+            Android freezes background apps it is allowed to freeze, and a frozen
+            app cannot mine. Let goblingames run without battery restrictions:
+            <strong>Settings → Apps → goblingames → Battery → Unrestricted</strong>.
+          </p>
+          <p>
+            On some phones that is not enough — <strong>Xiaomi/Redmi, Infinix,
+            Tecno, ZTE, Oppo/Realme</strong> and friends need <strong>Autostart</strong>
+            enabled for the app as well (Settings → Apps → goblingames →
+            Autostart / "Start in background"). The app asks for the battery
+            permission once, and the mining panel shows a line with a button
+            while the restriction is on. A phone left restricted mines for about
+            an hour and then goes quiet until you touch it.
+          </p>
+        </details>
+      </section>
+
+      <!-- Beta: builds we are testing. Never offered by the app itself. -->
+      <section id="beta" role="tabpanel" aria-labelledby="tab-beta" hidden>
+        <p class="beta-intro">
+          Test builds, published here only. The app <strong>never</strong> asks you to
+          update to these — it only suggests new <em>stable</em> releases. Download one
+          if you want to try what comes next and tell us what breaks.
         </p>
-        <p>
-          On some phones that is not enough — <strong>Xiaomi/Redmi, Infinix,
-          Tecno, ZTE, Oppo/Realme</strong> and friends need <strong>Autostart</strong>
-          enabled for the app as well (Settings → Apps → goblingames →
-          Autostart / "Start in background"). The app asks for the battery
-          permission once, and the mining panel shows a line with a button
-          while the restriction is on. A phone left restricted mines for about
-          an hour and then goes quiet until you touch it.
-        </p>
-      </details>
+        <div id="beta-list">
+          <div class="beta-empty">Loading beta builds…</div>
+        </div>
+      </section>
 
       <footer>
         Open downloads ·
@@ -197,5 +295,52 @@
         <a href="https://github.com/andresCadavidT/goblingames">GitHub</a>
       </footer>
     </main>
+
+    <script>
+      // Stable / Beta tabs.
+      const tabs = [document.getElementById('tab-stable'), document.getElementById('tab-beta')];
+      const panels = [document.getElementById('stable'), document.getElementById('beta')];
+      function select(index) {
+        tabs.forEach((tab, i) => tab.setAttribute('aria-selected', String(i === index)));
+        panels.forEach((panel, i) => { panel.hidden = i !== index; });
+        if (index === 1) loadBetas();
+      }
+      tabs.forEach((tab, i) => tab.addEventListener('click', () => select(i)));
+
+      // Beta builds come from beta.json, which only this page reads. The app's
+      // updater reads version.json and therefore can never offer a beta.
+      let betasLoaded = false;
+      async function loadBetas() {
+        if (betasLoaded) return;
+        betasLoaded = true;
+        const list = document.getElementById('beta-list');
+        try {
+          const response = await fetch('beta.json', { cache: 'no-store' });
+          if (!response.ok) throw new Error(String(response.status));
+          const data = await response.json();
+          const builds = Array.isArray(data.builds) ? data.builds : [];
+          if (builds.length === 0) {
+            list.innerHTML = '<div class="beta-empty">No beta builds right now. The current release is stable.</div>';
+            return;
+          }
+          list.innerHTML = builds.map((build) => {
+            const windows = build.windows
+              ? `<a class="btn btn-ghost" href="${build.windows}">⬇ Windows</a>`
+              : '';
+            const android = build.android
+              ? `<a class="btn btn-ghost" href="${build.android}">📱 Android</a>`
+              : '';
+            return `<article class="beta-card">
+              <h3>v${build.version}</h3>
+              <div class="beta-date">${build.date || ''}${build.beta ? ' · beta' : ''}</div>
+              <p class="beta-notes">${(build.notes || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>
+              ${windows}${android}
+            </article>`;
+          }).join('');
+        } catch (error) {
+          list.innerHTML = '<div class="beta-empty">Could not load the beta list. Try again in a moment.</div>';
+        }
+      }
+    </script>
   </body>
 </html>

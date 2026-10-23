@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.1.18",
+  "latest": "1.2.0",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.1.18 - 1.1.17 stopped the miner after 30 minutes of a congested commit slot and required pressing Mine. That was a regression. The loop now retries automatically: it keeps resending the session's proof every three seconds while the slot's seed is unchanged, and only a rejected proof or a rotated seed falls through to the clear. The clear presses one send every three seconds indefinitely (the first round still samples with five) and never stops for congestion. A 402 stops and raises KEYS INVALIDATED, a 409 stops with the wallet-cap reason, and a 419 waits for the epoch roll. Minimum stays 1.1.9."
+  "reason": "v1.2.0 - the desktop runs the same native Rust engine as Android: one implementation of pacing, clearing, the proof resume, claims and per-send diagnostics. Closing the SDK context after every session (the way Cappa's 'SDK worker closed' does) stopped the stale Block Producer route from poisoning every session after the first; the proof got its own 8 s send budget because a proof cut at 600 ms left no verdict and no rejection on chain; the proof phase is bounded to 24 sends so a session can no longer sit eleven minutes; and a session the preserved proof lands now counts as landed instead of showing as failed. In the 2026-10-22 evening run six sessions in a row resolved, four of them accepted back to back. Minimum stays 1.1.9."
 }
