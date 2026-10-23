@@ -1,8 +1,16 @@
 {
   "channel": "beta",
-  "updatedAt": "2026-10-22",
+  "updatedAt": "2026-10-23",
   "note": "Beta builds are listed here and on the site's Beta tab only. The app reads version.json (stable), so it never suggests one of these.",
   "builds": [
+    {
+      "version": "1.2.2",
+      "date": "2026-10-23",
+      "beta": true,
+      "notes": "Beta build. The app will not offer it as an update; stable releases are the only ones that show up there. - **A session whose verdict arrives late now counts as landed.** The 21:14 run   on 2026-10-22 ended ",
+      "windows": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.2-beta/goblingames-windows-setup.exe",
+      "android": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.2-beta/goblingames-android.apk"
+    },
     {
       "version": "1.2.1",
       "date": "2026-10-22",
