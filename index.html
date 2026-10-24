@@ -279,9 +279,8 @@
       <!-- Beta: builds we are testing. Never offered by the app itself. -->
       <section id="beta" role="tabpanel" aria-labelledby="tab-beta" hidden>
         <p class="beta-intro">
-          Test builds, published here only. The app <strong>never</strong> asks you to
-          update to these — it only suggests new <em>stable</em> releases. Download one
-          if you want to try what comes next and tell us what breaks.
+          No new beta builds are being published. The existing beta downloads
+          remain available below; the app still only offers <em>stable</em> releases.
         </p>
         <div id="beta-list">
           <div class="beta-empty">Loading beta builds…</div>
@@ -330,10 +329,13 @@
             const android = build.android
               ? `<a class="btn btn-ghost" href="${build.android}">📱 Android</a>`
               : '';
+            const notes = build.notes
+              ? `<p class="beta-notes">${build.notes.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>`
+              : '';
             return `<article class="beta-card">
               <h3>v${build.version}</h3>
               <div class="beta-date">${build.date || ''}${build.beta ? ' · beta' : ''}</div>
-              <p class="beta-notes">${(build.notes || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>
+              ${notes}
               ${windows}${android}
             </article>`;
           }).join('');
