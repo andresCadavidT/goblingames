@@ -4,6 +4,14 @@
   "note": "Beta builds are listed here and on the site's Beta tab only. The app reads version.json (stable), so it never suggests one of these.",
   "builds": [
     {
+      "version": "1.2.6",
+      "date": "2026-10-24",
+      "beta": true,
+      "notes": "Beta build; the app will not offer it as an update. - **Dead-end backoff.** After a session whose root never landed, the loop now   waits 30 s before opening another one, doubling to 3 min for consecutive   dead ends instead of firing a new root 3 s later into the same full queue.",
+      "windows": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.6-beta/goblingames-windows-setup.exe",
+      "android": "https://github.com/andresCadavidT/goblingames/releases/download/v1.2.6-beta/goblingames-android.apk"
+    },
+    {
       "version": "1.2.5",
       "date": "2026-10-24",
       "beta": true,
