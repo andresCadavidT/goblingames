@@ -2,5 +2,5 @@
   "minimum": "1.1.9",
   "latest": "1.3.0",
   "downloadUrl": "https://goblingames.app",
-  "reason": "Stable release; installed apps will offer it as an update.\r - **The node's head is real on desktop**: it is read from the chain (GraphQL, both endpoints) instead of reporting 0, so the epoch and `epoch-gate` work.\r - **Epoch gate**: a session is not opened when fewer than 130 s remain; the loop waits for the next epoch instead of starting one that cannot finish.\r - **Four root windows** instead of two (`root_attempts` 4, proof stays 2), and `Unknown` prepares a fresh BOC again.\r"
+  "reason": "v1.3.0 - the node head is now read from the chain on desktop, an epoch gate skips sessions that cannot finish, root gets four fresh BOCs instead of two, and Unknown prepares a new BOC again. Includes the 1.2.1-1.2.6 beta line (per-profile state, single-instance guard, dead-end backoff, queue reconciliation) and the 1.2.7-1.2.10 tuning. The Windows setup installs per user without administrator. Minimum stays 1.1.9."
 }
