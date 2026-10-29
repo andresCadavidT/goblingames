@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.3.0",
+  "latest": "1.4.0",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.3.0 - the node head is now read from the chain on desktop, an epoch gate skips sessions that cannot finish, root gets four fresh BOCs instead of two, and Unknown prepares a new BOC again. Includes the 1.2.1-1.2.6 beta line (per-profile state, single-instance guard, dead-end backoff, queue reconciliation) and the 1.2.7-1.2.10 tuning. The Windows setup installs per user without administrator. Minimum stays 1.1.9."
+  "reason": "v1.4.0 - mining sessions get through a congested network again: a signed commit lives 120 s and the same copy is re-sent until it lands or expires, and a new copy is never signed while the previous one can still land. Sessions are built in real time while the previous epoch finishes, and the commit goes out as soon as the epoch changes. Rewards are claimed inside the window where the contract still pays them (epochs N+2 to N+6), and stopping the miner pays what is already due. Logout stops the native miner and the Android service without an exit claim. Minimum stays 1.1.9."
 }
