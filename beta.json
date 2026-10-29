@@ -1,8 +1,14 @@
 {
   "channel": "beta",
-  "updatedAt": "2026-10-24",
-  "note": "Beta channel closed: no new beta builds are published. Existing downloads remain available.",
+  "updatedAt": "2026-10-29",
   "builds": [
+    {
+      "version": "1.4.1",
+      "date": "2026-10-29",
+      "beta": true,
+      "windows": "https://github.com/andresCadavidT/goblingames/releases/download/v1.4.1-beta/goblingames-windows-setup.exe",
+      "android": "https://github.com/andresCadavidT/goblingames/releases/download/v1.4.1-beta/goblingames-android.apk"
+    },
     {
       "version": "1.2.6",
       "date": "2026-10-24",
