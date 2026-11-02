@@ -1,2 +1,0 @@
-# The Corresponding Source under source/ must stay byte-exact (patch sha256s are checked by the build).
-source/** -text
