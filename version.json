@@ -1,6 +1,6 @@
 {
   "minimum": "1.1.9",
-  "latest": "1.4.0",
+  "latest": "2.0.0",
   "downloadUrl": "https://goblingames.app",
-  "reason": "v1.4.0 - mining sessions get through a congested network again: a signed commit lives 120 s and the same copy is re-sent until it lands or expires, and a new copy is never signed while the previous one can still land. Sessions are built in real time while the previous epoch finishes, and the commit goes out as soon as the epoch changes. Rewards are claimed inside the window where the contract still pays them (epochs N+2 to N+6), and stopping the miner pays what is already due. Logout stops the native miner and the Android service without an exit claim. Minimum stays 1.1.9."
+  "reason": "v2.0.0 - a new app for Windows and Android: download it from goblingames.app and connect your wallets again. Your NACKL are on the chain."
 }
