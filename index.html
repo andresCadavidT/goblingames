@@ -233,19 +233,54 @@
         <button class="tab" id="tab-beta" role="tab" aria-selected="false" aria-controls="beta">Beta</button>
       </div>
 
-      <!-- Stable: what every installed app is offered. -->
+      <!-- Stable. Windows: the 2.x app, which updates itself from updates/windows/latest.json.
+           Android: the 1.x app (pinned to the v1.4.0 release) until 2.x reaches Android. -->
       <section id="stable" role="tabpanel" aria-labelledby="tab-stable">
-        <a class="btn btn-download"
-           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-windows-setup.exe">
+        <a class="btn btn-download" href="downloads/goblingames_2.0.0_x64-setup.exe">
           ⬇ Download for Windows
         </a>
-        <p class="btn-meta">v1.4.0 · Windows 10/11 · ~26&nbsp;MB</p>
+        <p class="btn-meta">v2.0.0 · Windows 10/11 · new app</p>
 
         <a class="btn btn-android"
-           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-android.apk">
+           href="https://github.com/andresCadavidT/goblingames/releases/download/v1.4.0/goblingames-android.apk">
           📱 Download for Android
         </a>
-        <p class="btn-meta">v1.4.0 · Android 7+ · ~58&nbsp;MB</p>
+        <p class="btn-meta">v1.4.0 · Android 7+ · ~58&nbsp;MB<br />previous app: 2.x comes to Android later</p>
+
+        <details class="note">
+          <summary>✨ What's new in 2.0.0 for Windows</summary>
+          <p>
+            A new app, built on the official Bee Engine SDK. Up to 10 wallets in one
+            install, and taps are automatic. Each signed message is re-sent until it
+            lands, the next session is mined while the current one is delivered, and
+            rewards that are due are claimed before they expire.
+          </p>
+          <p>
+            It updates itself (<code>Install and restart</code>), keeps mining from the
+            tray when you close the window, and can start with Windows. No telemetry:
+            the log stays on your PC (<code>Save log (.txt)</code>).
+          </p>
+        </details>
+
+        <details class="note">
+          <summary>↻ Coming from goblingames 1.x on Windows?</summary>
+          <p>
+            1. In 1.x press <strong>Stop</strong> and leave it open for about 15 minutes,
+            so it claims what it has already earned.<br />
+            2. Uninstall it: <strong>Settings → Apps → goblingames → Uninstall</strong>.
+            Your NACKL stay in your wallet.<br />
+            3. Install 2.0.0 and pair your wallet again (QR code, then approve in AN Wallet).
+          </p>
+          <p>
+            A wallet mines on one device at a time: pairing it in 2.0.0 stops it in 1.x
+            on every other device, Android included.
+          </p>
+          <p>
+            Skipped step 2 and the installer says <code>Unable to uninstall!</code>?
+            Choose <code>Do not uninstall</code> and click Next: 2.0.0 takes the place of
+            1.x in the same folder.
+          </p>
+        </details>
 
         <details class="note">
           <summary>⚠ "Unrecognized app" / "unknown sources"?</summary>
