@@ -1,0 +1,202 @@
+diff --git a/bee_miner/src/wasm/premine.rs b/bee_miner/src/wasm/premine.rs
+index b41ec8a..d044278 100644
+--- a/bee_miner/src/wasm/premine.rs
++++ b/bee_miner/src/wasm/premine.rs
+@@ -42,6 +42,9 @@ pub(crate) struct PremineTarget {
+ ///   `_*Complexity == _*ComplexityOld`; otherwise `Err("complexity_unstable: ...")`.
+ /// - `_seed` already rotated (the in-flight session ended on chain): mine `_seed` with `Old`, as
+ ///   a sequential session would.
++/// - NewGoblin patch 0003: `_seed` is not the in-flight seed but `_seedNext` is. The read is one
++///   rotation behind the in-flight session, so `_seed` is a seed that session already used:
++///   `Err("chain_lagging: ...")`.
+ pub(crate) fn resolve_premine(
+     state: &SessionState,
+     in_flight_seed: &str,
+@@ -49,6 +52,13 @@ pub(crate) fn resolve_premine(
+     let current = (state.easy_complexity, state.hard_complexity);
+     let old = (state.easy_complexity_old, state.hard_complexity_old);
+     if state.seed != in_flight_seed {
++        // NewGoblin patch 0003: a read one rotation behind the in-flight session
++        if state.seed_next == in_flight_seed {
++            return Err(format!(
++                "chain_lagging: _seed {} is one rotation behind the in-flight {in_flight_seed}",
++                state.seed
++            ));
++        }
+         let (easy, hard) = old;
+         return Ok(PremineTarget {
+             seed: state.seed.clone(),
+@@ -75,6 +85,21 @@ pub(crate) fn can_premine(statuses: &[MinerStatus]) -> bool {
+     live.next() == Some(&MinerStatus::Submitting) && live.next().is_none()
+ }
+ 
++/// NewGoblin patch 0003: how long a premine session waits, before its preflight, for the chain to
++/// stop showing the in-flight session's commit.
++pub(crate) const PREMINE_CHAIN_WAIT_MS: u64 = 15_000;
++/// NewGoblin patch 0003: pause between the re-reads of that wait.
++pub(crate) const PREMINE_CHAIN_POLL_MS: u32 = 1_000;
++
++/// NewGoblin patch 0003: the chain still shows the in-flight session as pending: `_seed` is still
++/// its seed and its commit is set. A read taken a moment before that session ends (accept or
++/// cancel, both do `_seed = _seedNext`) looks like this, and the premine session's preflight
++/// would discard it (`seed_changed`). With no commit set the root never landed, so there is no
++/// end to wait for; an empty `in_flight_seed` is a normal session.
++pub(crate) fn awaiting_in_flight_end(state: &SessionState, in_flight_seed: &str) -> bool {
++    !in_flight_seed.is_empty() && state.seed == in_flight_seed && state.commit_data.is_some()
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -148,4 +173,51 @@ mod tests {
+         assert!(!busy(&[Finished]));
+         assert!(!busy(&[]));
+     }
++
++    // NewGoblin patch 0003: `state()` has `_seed = 0xA` (the in-flight session's seed) and
++    // `_seedNext = 0xB` (the premine session's).
++
++    #[test]
++    fn awaiting_in_flight_end_while_the_chain_shows_its_commit_on_its_seed() {
++        let mut st = state((10, 12), (10, 12));
++        st.commit_data = Some("0xc0ffee".into());
++        assert!(awaiting_in_flight_end(&st, "0xA"));
++    }
++
++    #[test]
++    fn not_awaiting_when_the_in_flight_root_never_landed() {
++        // `_seed` is still the in-flight one but nothing is committed: no end to wait for
++        let st = state((10, 12), (10, 12));
++        assert!(!awaiting_in_flight_end(&st, "0xA"));
++    }
++
++    #[test]
++    fn not_awaiting_once_the_chain_rotated_to_the_next_seed() {
++        let mut st = state((10, 12), (10, 12));
++        st.seed = "0xB".into();
++        st.commit_data = Some("0xc0ffee".into());
++        assert!(!awaiting_in_flight_end(&st, "0xA"));
++        st.commit_data = None;
++        assert!(!awaiting_in_flight_end(&st, "0xA"));
++    }
++
++    #[test]
++    fn not_awaiting_in_a_normal_session() {
++        // a normal session has no in-flight seed, whatever the chain shows
++        let mut st = state((10, 12), (10, 12));
++        st.commit_data = Some("0xc0ffee".into());
++        assert!(!awaiting_in_flight_end(&st, ""));
++        st.seed = String::new();
++        assert!(!awaiting_in_flight_end(&st, ""));
++    }
++
++    #[test]
++    fn premine_unsafe_when_the_read_is_one_rotation_behind_the_in_flight_session() {
++        // `_seed` is the seed before the in-flight one, which is only `_seedNext` in this read:
++        // mining on it would use a seed that session already used
++        let mut st = state((10, 12), (10, 12));
++        st.seed = "0xZ".into();
++        st.seed_next = "0xA".into();
++        assert!(resolve_premine(&st, "0xA").unwrap_err().starts_with("chain_lagging"));
++    }
+ }
+diff --git a/bee_miner/src/wasm/worker.rs b/bee_miner/src/wasm/worker.rs
+index 23193f3..fa39975 100644
+--- a/bee_miner/src/wasm/worker.rs
++++ b/bee_miner/src/wasm/worker.rs
+@@ -46,7 +46,11 @@ use crate::wasm::delivery::now_ms;
+ use crate::wasm::delivery::DeliveryErr;
+ use crate::wasm::delivery::DeliveryOk;
+ use crate::wasm::delivery::SubmitPolicy;
++// NewGoblin premine (patch 0003): the chain wait before B's preflight.
++use crate::wasm::premine::awaiting_in_flight_end;
+ use crate::wasm::premine::resolve_premine;
++use crate::wasm::premine::PREMINE_CHAIN_POLL_MS;
++use crate::wasm::premine::PREMINE_CHAIN_WAIT_MS;
+ use crate::wasm::DecodedSessionStatusData;
+ 
+ /// `MAX_LEN_TAPS` (mvsystem modifiers.sol:73): `setCommitData` requires `_tapsSize <= 10`.
+@@ -484,6 +488,23 @@ pub(crate) async fn run(
+         }
+     }
+ 
++    // NewGoblin premine (patch 0003): B reads the chain and waits for the in-flight session's end
++    // to show while it is still `Held`, so `can_premine()` stays false and JS cannot prepare the
++    // next session on the same stale view. The preflight below judges that read, without another.
++    let premine_read = if worker.premine {
++        let read = match read_session_state_retry(&worker.contract).await {
++            Ok(state) => Ok(wait_for_in_flight_end(&worker, &callback, state).await),
++            Err(e) => Err(e),
++        };
++        if worker.premine_ended() {
++            shutdown_worker(&worker, &workers_ref, false, false, &callback);
++            return;
++        }
++        Some(read)
++    } else {
++        None
++    };
++
+     // Submit data to miner contract
+     update_worker_status(worker.id, &workers_ref, MinerStatus::Submitting);
+     send_callback(
+@@ -495,7 +516,11 @@ pub(crate) async fn run(
+     );
+ 
+     // NewGoblin W2: root preflight against the chain state.
+-    let preflight = match read_session_state_retry(&worker.contract).await {
++    let state_read = match premine_read {
++        Some(read) => read, // NewGoblin premine (patch 0003): read while still held, see above
++        None => read_session_state_retry(&worker.contract).await,
++    };
++    let preflight = match state_read {
+         Ok(state) => preflight_check(
+             &state,
+             &worker.seed,
+@@ -983,6 +1008,46 @@ async fn hold_premine(
+     false
+ }
+ 
++/// NewGoblin premine (patch 0003): `state` is the read the premine session's preflight is about
++/// to judge, taken while the session is still `Held`. While it still shows the in-flight
++/// session's commit on its seed, that session's end (accepted or cancelled) may not have reached
++/// this read yet, and the preflight would discard the session (`seed_changed`) though the chain
++/// is about to show its seed. Re-reads once a second, for up to `PREMINE_CHAIN_WAIT_MS`, until a
++/// read no longer shows it. A failed re-read keeps the last good state. A discarded session or a
++/// freed Miner (`premine_ended`) ends the wait: the caller then ends quietly, and nothing is
++/// emitted here. Otherwise emits `premine_chain_wait` if it waited at all. Returns the state the
++/// preflight runs on.
++async fn wait_for_in_flight_end(
++    worker: &MinerWorker,
++    callback: &js_sys::Function,
++    mut state: SessionState,
++) -> SessionState {
++    let started_at = now_ms();
++    let mut polled = false;
++    while awaiting_in_flight_end(&state, &worker.in_flight_seed)
++        && now_ms().saturating_sub(started_at) < PREMINE_CHAIN_WAIT_MS
++        && !worker.premine_ended()
++    {
++        gloo_timers::future::TimeoutFuture::new(PREMINE_CHAIN_POLL_MS).await;
++        polled = true;
++        if let Ok(fresh) = read_session_state(&worker.contract).await {
++            state = fresh;
++        }
++    }
++    if polled && !worker.premine_ended() {
++        send_diag(
++            callback,
++            worker.id,
++            "premine_chain_wait",
++            json!({
++                "waited_ms": now_ms().saturating_sub(started_at),
++                "settled": !awaiting_in_flight_end(&state, &worker.in_flight_seed),
++            }),
++        );
++    }
++    state
++}
++
+ async fn commit_is(worker: &MinerWorker, data_hex: &str) -> Result<bool, String> {
+     Ok(read_session_state(&worker.contract).await?.has_commit(data_hex))
+ }

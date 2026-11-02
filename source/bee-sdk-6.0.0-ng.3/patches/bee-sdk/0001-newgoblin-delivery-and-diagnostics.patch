@@ -1,0 +1,2006 @@
+NewGoblin patch 0001 on gosh-sh/bee-engine v6.0.0 (015bc466613e7b7c41f272dc16ba0cacbf0e4d93).
+Delivery of the same signed message with deadlines + session diagnostics (bee_miner/src/wasm only).
+Hunk-by-hunk explanation: 0001-newgoblin-delivery-and-diagnostics.md. Design: docs/research/2026-10-31-bee-sdk-patch-design.md §E.
+License: AGPL-3.0-only (same as upstream).
+
+diff --git a/bee_miner/src/wasm/delivery.rs b/bee_miner/src/wasm/delivery.rs
+new file mode 100644
+index 0000000..c2963c6
+--- /dev/null
++++ b/bee_miner/src/wasm/delivery.rs
+@@ -0,0 +1,427 @@
++//! NewGoblin patch, design doc `docs/research/2026-10-31-bee-sdk-patch-design.md` §E.2.
++//!
++//! Delivery of one signed external message (`PreparedMessage`): the SAME BOC is
++//! resent until the node accepts it, the chain shows its effect (`confirm`), or
++//! the deadline passes. Resending the same BOC keeps the message id, so the
++//! node deduplicates it and the contract cannot run it twice; re-signing (what
++//! a plain retry of `send_message` does) would create a second message.
++
++use std::sync::Arc;
++
++use ackinacki_kit::contracts::delivery::PreparedMessage;
++use ackinacki_kit::tvm_client::error::ClientError;
++use ackinacki_kit::tvm_client::ClientContext;
++use futures::future::select;
++use futures::future::Either;
++use serde_json::json;
++use serde_json::Value;
++
++/// Lifetime (`expire` header) of every message the miner signs. The SDK default is 40 s.
++pub(crate) const MESSAGE_EXPIRATION_MS: u32 = 240_000;
++/// `query_timeout` of the sending context: the BM answers sends in 31–50 s.
++pub(crate) const SEND_QUERY_TIMEOUT_MS: u32 = 60_000;
++/// `query_timeout` of the reading context (event poll, account reads), as upstream.
++pub(crate) const READ_QUERY_TIMEOUT_MS: u32 = 10_000;
++/// Stop resending this long before the message expires.
++const EXPIRY_MARGIN_MS: u64 = 2_000;
++
++// tvm_client error codes (client/errors.rs, net/errors.rs, processing/errors.rs).
++const WEBSOCKET_CONNECT_ERROR: u32 = 6;
++const WEBSOCKET_RECEIVE_ERROR: u32 = 7;
++const WEBSOCKET_SEND_ERROR: u32 = 8;
++const HTTP_REQUEST_SEND_ERROR: u32 = 11; // network error, timeout, "Server responded with code 5xx/429"
++const HTTP_REQUEST_PARSE_ERROR: u32 = 12; // e.g. an HTML 502 page on the last transport attempt
++const MESSAGE_ALREADY_EXPIRED: u32 = 501;
++const MESSAGE_EXPIRED: u32 = 507;
++const WEBSOCKET_DISCONNECTED: u32 = 610;
++const GRAPHQL_WEBSOCKET_INIT_ERROR: u32 = 613;
++const GRAPHQL_CONNECTION_ERROR: u32 = 617;
++const ALL_ATTEMPTS_FAILED: u32 = 623;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct SubmitPolicy {
++    pub root_deadline_ms: u64,
++    pub proof_deadline_ms: u64,
++    pub retry_min_ms: u64,
++    pub retry_max_ms: u64,
++    /// One `send_once` call (the SDK's 3 transport attempts) is cut after this.
++    pub attempt_timeout_ms: u64,
++    /// Absolute (`Date.now()` scale); 0 = off.
++    pub epoch_deadline_ms: u64,
++}
++
++impl Default for SubmitPolicy {
++    fn default() -> Self {
++        Self {
++            root_deadline_ms: 210_000,
++            proof_deadline_ms: 240_000,
++            retry_min_ms: 1_000,
++            retry_max_ms: 30_000,
++            attempt_timeout_ms: SEND_QUERY_TIMEOUT_MS as u64 + 5_000,
++            epoch_deadline_ms: 0,
++        }
++    }
++}
++
++impl SubmitPolicy {
++    /// `set_submit_policy` values, clamped to sane ranges; keeps the epoch deadline.
++    pub fn with_limits(
++        self,
++        root_deadline_ms: u32,
++        proof_deadline_ms: u32,
++        retry_min_ms: u32,
++        retry_max_ms: u32,
++    ) -> Self {
++        let retry_min_ms = (retry_min_ms as u64).clamp(100, 60_000);
++        Self {
++            root_deadline_ms: (root_deadline_ms as u64).clamp(10_000, 600_000),
++            proof_deadline_ms: (proof_deadline_ms as u64).clamp(10_000, 600_000),
++            retry_min_ms,
++            retry_max_ms: (retry_max_ms as u64).clamp(retry_min_ms, 120_000),
++            ..self
++        }
++    }
++
++    /// `set_epoch_deadline` value: absolute ms, anything not finite or <= 0 turns it off.
++    pub fn with_epoch_deadline(self, epoch_deadline_ms: f64) -> Self {
++        let epoch_deadline_ms = if epoch_deadline_ms.is_finite() && epoch_deadline_ms > 0.0 {
++            epoch_deadline_ms as u64
++        } else {
++            0
++        };
++        Self { epoch_deadline_ms, ..self }
++    }
++}
++
++/// Outcome of one send attempt.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) enum Attempt {
++    Accepted,
++    /// The node already has this message id.
++    Duplicate,
++    /// The message may or may not have been taken (network, queue full, BP redirect…).
++    Ambiguous(String),
++    /// It ran and the compute phase failed: resending the same BOC cannot help.
++    ExecutedFailed(String),
++    Expired,
++    Fatal(String),
++}
++
++impl Attempt {
++    pub fn name(&self) -> &'static str {
++        match self {
++            Attempt::Accepted => "accepted",
++            Attempt::Duplicate => "duplicate",
++            Attempt::Ambiguous(_) => "ambiguous",
++            Attempt::ExecutedFailed(_) => "executed_failed",
++            Attempt::Expired => "expired",
++            Attempt::Fatal(_) => "fatal",
++        }
++    }
++}
++
++/// `node_code` is `data.node_error.extensions.code` (tvm_client net/errors.rs
++/// `send_message_server_error`), `code` the ClientError code.
++pub(crate) fn classify_parts(code: u32, node_code: Option<&str>, message: &str) -> Attempt {
++    match node_code {
++        Some("DUPLICATE_MESSAGE") => return Attempt::Duplicate,
++        Some(
++            c @ ("QUEUE_OVERFLOW" | "INTERNAL_ERROR" | "WRONG_PRODUCER" | "THREAD_MISMATCH"
++            | "TOKEN_EXPIRED"),
++        ) => return Attempt::Ambiguous(c.to_string()),
++        Some("TVM_ERROR") => return Attempt::ExecutedFailed(message.to_string()),
++        _ => {}
++    }
++    match code {
++        MESSAGE_ALREADY_EXPIRED | MESSAGE_EXPIRED => Attempt::Expired,
++        WEBSOCKET_CONNECT_ERROR
++        | WEBSOCKET_RECEIVE_ERROR
++        | WEBSOCKET_SEND_ERROR
++        | HTTP_REQUEST_SEND_ERROR
++        | HTTP_REQUEST_PARSE_ERROR
++        | WEBSOCKET_DISCONNECTED
++        | GRAPHQL_WEBSOCKET_INIT_ERROR
++        | GRAPHQL_CONNECTION_ERROR
++        | ALL_ATTEMPTS_FAILED => Attempt::Ambiguous(message.to_string()),
++        _ => Attempt::Fatal(message.to_string()),
++    }
++}
++
++/// A send the node answered with a result: it ran. `aborted` or a compute exit code other than
++/// 0/1 (TVM success codes) means it ran and failed, like a `TVM_ERROR`.
++pub(crate) fn classify_result(aborted: Option<bool>, exit_code: Option<i32>) -> Attempt {
++    match (aborted, exit_code) {
++        (Some(true), code) => Attempt::ExecutedFailed(format!("aborted (exit_code {code:?})")),
++        (_, Some(code)) if code != 0 && code != 1 => {
++            Attempt::ExecutedFailed(format!("exit_code {code}"))
++        }
++        _ => Attempt::Accepted,
++    }
++}
++
++pub(crate) fn node_code(e: &ClientError) -> Option<&str> {
++    e.data().pointer("/node_error/extensions/code").and_then(Value::as_str)
++}
++
++pub(crate) fn classify(e: &ClientError) -> Attempt {
++    classify_parts(e.code(), node_code(e), e.message())
++}
++
++/// `min(deadline, expires_at - 2 s, epoch deadline if set)`, all in ms.
++pub(crate) fn hard_deadline(
++    deadline_ms: u64,
++    expires_at_s: Option<u32>,
++    epoch_deadline_ms: u64,
++) -> u64 {
++    let mut d = deadline_ms;
++    if let Some(expires_at) = expires_at_s {
++        d = d.min((expires_at as u64 * 1000).saturating_sub(EXPIRY_MARGIN_MS));
++    }
++    if epoch_deadline_ms != 0 {
++        d = d.min(epoch_deadline_ms);
++    }
++    d
++}
++
++/// Pause before resend `k` (0-based): `min(retry_max, retry_min * 2^k)` plus 0–20 % jitter
++/// (`rand` in `[0, 1]`).
++pub(crate) fn backoff_ms(k: u32, policy: &SubmitPolicy, rand: f64) -> u64 {
++    let factor = 1u64.checked_shl(k).unwrap_or(u64::MAX);
++    let base = policy.retry_min_ms.saturating_mul(factor).min(policy.retry_max_ms);
++    let jitter = (base as f64 * 0.2 * rand.clamp(0.0, 1.0)).round() as u64;
++    base + jitter
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum DeliveryOk {
++    /// The node accepted the message.
++    Sent,
++    /// `confirm` saw its effect on chain (late landing, duplicate…).
++    ConfirmedOnChain,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct DeliveryErr {
++    /// `executed_failed` | `expired` | `fatal` | `deadline` | `not_sent` (deadline already past) |
++    /// `dropped` (the Miner was freed)
++    pub kind: &'static str,
++    pub message: String,
++}
++
++pub(crate) fn now_ms() -> u64 {
++    js_sys::Date::now() as u64
++}
++
++/// Sends `msg` until it is accepted, confirmed on chain or `hard_deadline` passes.
++/// Every attempt is reported as `on_event("send_attempt", {...})`.
++pub(crate) async fn deliver<C, CF>(
++    client: Arc<ClientContext>,
++    msg: &PreparedMessage,
++    label: &str,
++    deadline_ms: u64,
++    epoch_deadline_ms: u64,
++    policy: SubmitPolicy,
++    confirm: C,
++    on_event: &dyn Fn(&str, Value),
++    dropped: &dyn Fn() -> bool,
++) -> Result<DeliveryOk, DeliveryErr>
++where
++    C: Fn() -> CF,
++    CF: Future<Output = Result<bool, String>>,
++{
++    let hard = hard_deadline(deadline_ms, msg.expires_at(), epoch_deadline_ms);
++    let mut attempt: u32 = 0;
++    let mut last_error = String::from("deadline reached before the first attempt");
++
++    while now_ms() < hard {
++        // The Miner was freed (its workers keep running): never send for it again.
++        if dropped() {
++            return Err(DeliveryErr { kind: "dropped", message: "miner dropped".into() });
++        }
++        attempt += 1;
++        let budget = policy.attempt_timeout_ms.min(hard.saturating_sub(now_ms())).max(1);
++        let send = Box::pin(msg.send_once(client.clone()));
++        let timer = Box::pin(gloo_timers::future::TimeoutFuture::new(budget as u32));
++        let (outcome, code, node) = match select(send, timer).await {
++            Either::Left((Ok(r), _)) => (classify_result(r.aborted, r.exit_code), None, None),
++            Either::Left((Err(e), _)) => {
++                (classify(&e), Some(e.code()), node_code(&e).map(str::to_string))
++            }
++            Either::Right(_) => (Attempt::Ambiguous("attempt timeout".to_string()), None, None),
++        };
++        let detail = match &outcome {
++            Attempt::Ambiguous(m) | Attempt::ExecutedFailed(m) | Attempt::Fatal(m) => m.clone(),
++            _ => String::new(),
++        };
++        on_event(
++            "send_attempt",
++            json!({
++                "kind": label,
++                "attempt": attempt,
++                "outcome": outcome.name(),
++                "code": code,
++                "node_code": node,
++                "message_id": msg.message_id(),
++                "error": if detail.is_empty() { None } else { Some(detail.clone()) },
++            }),
++        );
++
++        match outcome {
++            Attempt::Accepted => return Ok(DeliveryOk::Sent),
++            Attempt::Expired => {
++                if let Ok(true) = confirm().await {
++                    return Ok(DeliveryOk::ConfirmedOnChain);
++                }
++                return Err(DeliveryErr { kind: "expired", message: "message expired".into() });
++            }
++            Attempt::Fatal(m) => return Err(DeliveryErr { kind: "fatal", message: m }),
++            Attempt::Duplicate | Attempt::Ambiguous(_) | Attempt::ExecutedFailed(_) => {
++                if let Ok(true) = confirm().await {
++                    return Ok(DeliveryOk::ConfirmedOnChain);
++                }
++                if let Attempt::ExecutedFailed(m) = outcome {
++                    return Err(DeliveryErr { kind: "executed_failed", message: m });
++                }
++                last_error = if detail.is_empty() { outcome.name().to_string() } else { detail };
++            }
++        }
++
++        let pause = backoff_ms(attempt - 1, &policy, js_sys::Math::random());
++        let left = hard.saturating_sub(now_ms());
++        if pause >= left {
++            break;
++        }
++        gloo_timers::future::TimeoutFuture::new(pause as u32).await;
++    }
++
++    // Last look before giving up: it may have landed during the final attempt.
++    if let Ok(true) = confirm().await {
++        return Ok(DeliveryOk::ConfirmedOnChain);
++    }
++    let kind = if attempt == 0 { "not_sent" } else { "deadline" };
++    Err(DeliveryErr { kind, message: last_error })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn err_with_node_code(code: u32, node: &str) -> ClientError {
++        let mut e = ClientError::with_code_message(code, format!("node said {node}"));
++        e.data_mut()["node_error"]["extensions"]["code"] = Value::String(node.to_string());
++        e
++    }
++
++    #[test]
++    fn classify_node_codes() {
++        assert_eq!(classify(&err_with_node_code(621, "DUPLICATE_MESSAGE")), Attempt::Duplicate);
++        for c in [
++            "QUEUE_OVERFLOW",
++            "INTERNAL_ERROR",
++            "WRONG_PRODUCER",
++            "THREAD_MISMATCH",
++            "TOKEN_EXPIRED",
++        ] {
++            assert_eq!(
++                classify(&err_with_node_code(621, c)),
++                Attempt::Ambiguous(c.to_string()),
++                "{c}"
++            );
++        }
++        assert!(matches!(
++            classify(&err_with_node_code(621, "TVM_ERROR")),
++            Attempt::ExecutedFailed(_)
++        ));
++        // An unknown node code falls through to the ClientError code: 621 is not retryable.
++        assert!(matches!(classify(&err_with_node_code(621, "SOMETHING_NEW")), Attempt::Fatal(_)));
++    }
++
++    #[test]
++    fn classify_client_codes() {
++        let c = |code: u32, msg: &str| classify(&ClientError::with_code_message(code, msg.into()));
++        // 3 x query_timeout in query_http: "fetch operation timeout", code 11 (§A.1)
++        assert!(matches!(c(11, "fetch operation timeout"), Attempt::Ambiguous(_)));
++        assert!(matches!(c(11, "Server responded with status 502"), Attempt::Ambiguous(_)));
++        assert!(matches!(c(11, "Server responded with code 429: busy"), Attempt::Ambiguous(_)));
++        assert!(matches!(c(12, "Body is not a valid JSON"), Attempt::Ambiguous(_)));
++        assert!(matches!(c(623, "All attempts failed."), Attempt::Ambiguous(_)));
++        for code in [6, 7, 8, 610, 613, 617] {
++            assert!(matches!(c(code, "net"), Attempt::Ambiguous(_)), "{code}");
++        }
++        assert_eq!(c(501, "Message expired"), Attempt::Expired);
++        assert_eq!(c(507, "Message expired"), Attempt::Expired);
++        assert!(matches!(c(23, "Invalid params"), Attempt::Fatal(_)));
++        assert!(matches!(c(518, "dapp_id required"), Attempt::Fatal(_)));
++        assert!(matches!(c(621, "send failed without node code"), Attempt::Fatal(_)));
++    }
++
++    #[test]
++    fn node_code_wins_over_client_code() {
++        // A TVM_ERROR carried by an "Ambiguous" client code is still an executed failure.
++        assert!(matches!(classify_parts(11, Some("TVM_ERROR"), "x"), Attempt::ExecutedFailed(_)));
++        assert_eq!(classify_parts(501, Some("DUPLICATE_MESSAGE"), "x"), Attempt::Duplicate);
++    }
++
++    #[test]
++    fn a_node_result_that_aborted_is_an_executed_failure() {
++        assert_eq!(classify_result(None, None), Attempt::Accepted);
++        assert_eq!(classify_result(Some(false), Some(0)), Attempt::Accepted);
++        assert_eq!(classify_result(Some(false), Some(1)), Attempt::Accepted);
++        assert!(matches!(classify_result(Some(true), Some(0)), Attempt::ExecutedFailed(_)));
++        assert!(matches!(classify_result(Some(true), None), Attempt::ExecutedFailed(_)));
++        assert!(matches!(classify_result(None, Some(102)), Attempt::ExecutedFailed(_)));
++        assert!(matches!(classify_result(Some(false), Some(-14)), Attempt::ExecutedFailed(_)));
++    }
++
++    #[test]
++    fn hard_deadline_takes_the_earliest_bound() {
++        let now = 1_800_000_000_000u64;
++        let expires = ((now + 240_000) / 1000) as u32;
++        // root: 210 s < expiry - 2 s
++        assert_eq!(hard_deadline(now + 210_000, Some(expires), 0), now + 210_000);
++        // proof: 240 s is cut by expiry - 2 s
++        assert_eq!(hard_deadline(now + 240_000, Some(expires), 0), now + 238_000);
++        // epoch end first
++        assert_eq!(hard_deadline(now + 210_000, Some(expires), now + 60_000), now + 60_000);
++        // epoch end after the others: ignored
++        assert_eq!(hard_deadline(now + 210_000, Some(expires), now + 900_000), now + 210_000);
++        // no expire header: deadline only
++        assert_eq!(hard_deadline(now + 5_000, None, 0), now + 5_000);
++        // already expired message: in the past (no attempt is made)
++        assert_eq!(hard_deadline(now, Some(1), 0), 0);
++    }
++
++    #[test]
++    fn backoff_doubles_up_to_max_and_jitter_is_bounded() {
++        let p = SubmitPolicy::default();
++        assert_eq!(backoff_ms(0, &p, 0.0), 1_000);
++        assert_eq!(backoff_ms(1, &p, 0.0), 2_000);
++        assert_eq!(backoff_ms(4, &p, 0.0), 16_000);
++        assert_eq!(backoff_ms(5, &p, 0.0), 30_000);
++        assert_eq!(backoff_ms(200, &p, 0.0), 30_000); // no shift overflow
++        for k in 0..12 {
++            let base = backoff_ms(k, &p, 0.0);
++            for r in [0.0, 0.25, 0.5, 0.999, 1.0, 7.0, -3.0] {
++                let v = backoff_ms(k, &p, r);
++                assert!(v >= base && v <= base + base / 5, "k={k} r={r} v={v}");
++            }
++        }
++        assert_eq!(backoff_ms(5, &p, 1.0), 36_000);
++    }
++
++    #[test]
++    fn policy_is_clamped_and_keeps_epoch_deadline() {
++        let p = SubmitPolicy::default().with_epoch_deadline(1_800_000_000_000.0);
++        let q = p.with_limits(0, u32::MAX, 0, 1);
++        assert_eq!(q.root_deadline_ms, 10_000);
++        assert_eq!(q.proof_deadline_ms, 600_000);
++        assert_eq!(q.retry_min_ms, 100);
++        assert_eq!(q.retry_max_ms, 100); // never below retry_min
++        assert_eq!(q.epoch_deadline_ms, 1_800_000_000_000);
++        let d = SubmitPolicy::default().with_limits(210_000, 240_000, 1_000, 30_000);
++        assert_eq!(d, SubmitPolicy::default());
++        assert_eq!(p.with_epoch_deadline(0.0).epoch_deadline_ms, 0);
++        assert_eq!(p.with_epoch_deadline(f64::NAN).epoch_deadline_ms, 0);
++        assert_eq!(p.with_epoch_deadline(-5.0).epoch_deadline_ms, 0);
++    }
++}
+diff --git a/bee_miner/src/wasm/miner.rs b/bee_miner/src/wasm/miner.rs
+index 1e95951..7feacbf 100644
+--- a/bee_miner/src/wasm/miner.rs
++++ b/bee_miner/src/wasm/miner.rs
+@@ -4,7 +4,10 @@ use std::cell::RefCell;
+ use std::collections::VecDeque;
+ use std::rc::Rc;
+ use std::sync::Arc;
++use std::time::Duration;
+ 
++use ackinacki_kit::contracts::delivery::ContractContext;
++use ackinacki_kit::contracts::delivery::DirectMessageSender;
+ use ackinacki_kit::contracts::mvsystem;
+ use ackinacki_kit::contracts::mvsystem::miner::contract::ParamsOfCancelSession;
+ use ackinacki_kit::contracts::mvsystem::miner::contract::ParamsOfGetReward;
+@@ -12,7 +15,9 @@ use ackinacki_kit::contracts::mvsystem::miner::events::DecodedMinerEvent;
+ use ackinacki_kit::contracts::traits::AccountAccessor;
+ use ackinacki_kit::contracts::traits::ContextAccessor;
+ use ackinacki_kit::contracts::traits::DecodeAccountData;
++use ackinacki_kit::contracts::traits::SendMessage;
+ use ackinacki_kit::shared::traits::guarded::AsyncGuarded;
++use ackinacki_kit::tvm_client::abi::CallSet;
+ use ackinacki_kit::tvm_client::abi::Signer;
+ use ackinacki_kit::tvm_client::crypto::KeyPair;
+ use ackinacki_kit::tvm_client::net;
+@@ -23,8 +28,11 @@ use wasm_bindgen::prelude::*;
+ 
+ use crate::graphql::block::BlocksBlockchain;
+ use crate::graphql::GqlResponse;
++use crate::wasm::delivery;
++use crate::wasm::delivery::SubmitPolicy;
+ use crate::wasm::get_miner_events;
+ use crate::wasm::worker;
++use crate::wasm::worker::read_session_state;
+ use crate::wasm::worker::MinerCommand;
+ use crate::wasm::worker::MinerStatus;
+ use crate::wasm::worker::MinerWorker;
+@@ -32,10 +40,17 @@ use crate::wasm::DecodedSessionStatusData;
+ use crate::wasm::GraphqlBlockData;
+ use crate::wasm::MinerAccountData;
+ 
++/// NewGoblin §E.1: a stale commit found by `Miner.new` gets this long to be cancelled
++/// (the JS side gives `Miner.new` 90 s in total).
++const NEW_CANCEL_DEADLINE_MS: u64 = 60_000;
++
+ #[wasm_bindgen]
+ pub struct Miner {
+     app_id: String,
+     contract: mvsystem::miner::contract::Miner,
++    /// NewGoblin §E.1: same contract, sending context (long timeout, explicit expire).
++    send_contract: mvsystem::miner::contract::Miner,
++    policy: Rc<Cell<SubmitPolicy>>,
+     keys: KeyPair,
+     seeds: Rc<RefCell<VecDeque<String>>>,
+     complexity: Rc<Cell<(u32, u32)>>,
+@@ -59,18 +74,39 @@ impl Miner {
+         public_key: String,
+         secret_key: String,
+     ) -> Result<Miner, JsError> {
+-        // Create blockchain context
+-        let tvm_context = {
++        // NewGoblin §E.1: two blockchain contexts. Reads (event poll, account data) keep the
++        // upstream 10 s query timeout; sends wait up to 60 s per transport attempt and sign
++        // messages that stay valid for 240 s, so the same message can be resent.
++        let read_context = {
++            let mut config = ClientConfig::default();
++            config.network.endpoints = Some(endpoints.clone());
++            config.network.query_timeout = delivery::READ_QUERY_TIMEOUT_MS;
++
++            let context = ClientContext::new(config).map_err(|e| JsError::new(&e.to_string()))?;
++            Arc::new(context)
++        };
++        let send_context = {
+             let mut config = ClientConfig::default();
+             config.network.endpoints = Some(endpoints);
+-            config.network.query_timeout = 10000;
++            config.network.query_timeout = delivery::SEND_QUERY_TIMEOUT_MS;
++            config.abi.message_expiration_timeout = delivery::MESSAGE_EXPIRATION_MS;
+ 
+             let context = ClientContext::new(config).map_err(|e| JsError::new(&e.to_string()))?;
+             Arc::new(context)
+         };
+ 
+         // Read current complexity and seeds from contract
+-        let contract = mvsystem::miner::contract::Miner::new_default(tvm_context.clone(), &address);
++        let contract =
++            mvsystem::miner::contract::Miner::new_default(read_context.clone(), &address);
++        let send_contract = mvsystem::miner::contract::Miner::new_default(
++            ContractContext::with_sender(
++                send_context,
++                Arc::new(DirectMessageSender),
++                Duration::from_millis(delivery::MESSAGE_EXPIRATION_MS as u64),
++            ),
++            &address,
++        );
++        let policy = Rc::new(Cell::new(SubmitPolicy::default()));
+         let keys = KeyPair { public: public_key, secret: secret_key };
+         let details = match contract.get_details().await {
+             Ok(data) => data,
+@@ -82,13 +118,10 @@ impl Miner {
+         let complexity = (details.easy_complexity, details.hard_complexity);
+         let seeds = {
+             if details.submit_session_data.is_some() {
+-                let cancel_session_result = contract
+-                    .cancel_session(
+-                        ParamsOfCancelSession { app_id: app_id.clone() },
+-                        Signer::Keys { keys: keys.clone() },
+-                    )
+-                    .await;
+-                if let Err(e) = cancel_session_result {
++                // NewGoblin §E.1: deliver the cancel and confirm `_commitData` is gone.
++                if let Err(e) =
++                    cancel_on_new(&contract, &send_contract, &app_id, &keys, policy.get()).await
++                {
+                     return Err(JsError::new(&format!("Cancel stale session data ({e})")));
+                 }
+                 VecDeque::from([details.next_seed])
+@@ -101,6 +134,8 @@ impl Miner {
+         let miner = Miner {
+             app_id: app_id.clone(),
+             contract: contract.clone(),
++            send_contract,
++            policy,
+             keys,
+             seeds: Rc::new(RefCell::new(seeds)),
+             complexity: Rc::new(Cell::new(complexity)),
+@@ -116,18 +151,20 @@ impl Miner {
+         let dropped_ref = miner.dropped.clone();
+         wasm_bindgen_futures::spawn_local(async move {
+             let mut after_dt = events_after_dt;
++            let mut seen_events = VecDeque::new();
+ 
+             while !dropped_ref.get() {
+                 gloo_timers::future::TimeoutFuture::new(2500).await;
+                 web_sys::console::debug_1(&"Read miner events thread".to_string().into());
+ 
+-                let decoded_events = match get_miner_events(&contract_ref, after_dt).await {
+-                    Ok(items) => items,
+-                    Err(e) => {
+-                        web_sys::console::error_1(&e.into());
+-                        continue;
+-                    }
+-                };
++                let decoded_events =
++                    match get_miner_events(&contract_ref, after_dt, &mut seen_events).await {
++                        Ok(items) => items,
++                        Err(e) => {
++                            web_sys::console::error_1(&e.into());
++                            continue;
++                        }
++                    };
+ 
+                 let mut created_at = Vec::new();
+                 for decoded_event in decoded_events {
+@@ -185,25 +222,22 @@ impl Miner {
+         Ok(miner)
+     }
+ 
++    /// NewGoblin §E.6: sessions are sequential. The worker reads the seed from the chain
++    /// (H1), so the local seed queue no longer gates a start.
+     #[wasm_bindgen(js_name = can_start)]
+     pub fn can_start(&self) -> bool {
+-        let is_active_worker =
+-            self.workers.borrow().iter().any(|w| w.status == MinerStatus::Computing);
+-        let is_seeds_empty = self.seeds.borrow().is_empty();
+-
+-        !is_active_worker && !is_seeds_empty
++        !self.is_busy()
+     }
+ 
+     #[wasm_bindgen(js_name = start)]
+     pub fn start(&self, duration_ms: u32, callback: js_sys::Function) -> Result<(), JsError> {
+         // Create worker
+-        if self.workers.borrow().iter().any(|w| w.status == MinerStatus::Computing) {
++        if self.is_busy() {
+             return Err(JsError::new("There is already running worker"));
+         }
+ 
+-        let Some(seed) = self.seeds.borrow_mut().pop_front() else {
+-            return Err(JsError::new("No seeds available"));
+-        };
++        // Only a hint: the worker mines on the contract's `_seed` (NewGoblin H1).
++        let seed = self.seeds.borrow_mut().pop_front().unwrap_or_default();
+ 
+         // Spawn worker
+         let (worker_sender, worker_receiver) = unbounded::<MinerCommand>();
+@@ -219,6 +253,9 @@ impl Miner {
+             duration_ms: duration_ms as u64,
+             easy_complexity,
+             hard_complexity,
++            send_contract: self.send_contract.clone(),
++            policy: self.policy.clone(),
++            dropped: self.dropped.clone(),
+         };
+ 
+         let seeds_ref = self.seeds.clone();
+@@ -264,6 +301,41 @@ impl Miner {
+         self.seeds.borrow_mut().retain(|v| v != &seed);
+     }
+ 
++    /// NewGoblin §E.5: root / proof delivery deadlines and resend backoff (ms), clamped.
++    /// Defaults: 210000, 240000, 1000, 30000.
++    #[wasm_bindgen(js_name = set_submit_policy)]
++    pub fn set_submit_policy(
++        &self,
++        root_deadline_ms: u32,
++        proof_deadline_ms: u32,
++        retry_min_ms: u32,
++        retry_max_ms: u32,
++    ) {
++        let policy = self.policy.get().with_limits(
++            root_deadline_ms,
++            proof_deadline_ms,
++            retry_min_ms,
++            retry_max_ms,
++        );
++        self.policy.set(policy);
++    }
++
++    /// NewGoblin §E.5: absolute end of the current reward epoch (`Date.now()` scale);
++    /// root and proof delivery stop there. 0 = off.
++    #[wasm_bindgen(js_name = set_epoch_deadline)]
++    pub fn set_epoch_deadline(&self, epoch_deadline_ms: f64) {
++        self.policy.set(self.policy.get().with_epoch_deadline(epoch_deadline_ms));
++    }
++
++    /// NewGoblin §E.5 / W8: seed, complexities, commit and interval of the miner contract.
++    #[wasm_bindgen(js_name = get_session_state)]
++    pub async fn get_session_state(&self) -> Result<JsValue, JsError> {
++        let state = read_session_state(&self.contract).await.map_err(|e| JsError::new(&e))?;
++        let json = serde_json::to_string(&state)
++            .map_err(|e| JsError::new(&format!("Serialize session state ({e})")))?;
++        js_sys::JSON::parse(&json).map_err(|_| JsError::new("Parse session state"))
++    }
++
+     #[wasm_bindgen(js_name = get_reward)]
+     pub async fn get_reward(&self) -> Result<(), JsError> {
+         let _ = self
+@@ -334,6 +406,51 @@ impl Miner {
+     }
+ }
+ 
++impl Miner {
++    /// NewGoblin §E.6: any worker that is queued, mining or submitting blocks a new start.
++    fn is_busy(&self) -> bool {
++        self.workers.borrow().iter().any(|w| {
++            matches!(
++                w.status,
++                MinerStatus::Queued | MinerStatus::Computing | MinerStatus::Submitting
++            )
++        })
++    }
++}
++
++/// NewGoblin §E.1: `cancelCommitData` for `Miner.new`, delivered until `_commitData` is gone.
++async fn cancel_on_new(
++    contract: &mvsystem::miner::contract::Miner,
++    send_contract: &mvsystem::miner::contract::Miner,
++    app_id: &str,
++    keys: &KeyPair,
++    policy: SubmitPolicy,
++) -> Result<(), String> {
++    let call_set = CallSet {
++        function_name: "cancelCommitData".to_string(),
++        header: None,
++        input: Some(serde_json::json!(ParamsOfCancelSession { app_id: app_id.to_string() })),
++    };
++    let msg = send_contract
++        .prepare_message(Some(call_set), None, Signer::Keys { keys: keys.clone() })
++        .await
++        .map_err(|e| format!("Prepare cancel ({e})"))?;
++    delivery::deliver(
++        send_contract.context().clone(),
++        &msg,
++        "cancel",
++        delivery::now_ms() + NEW_CANCEL_DEADLINE_MS,
++        0,
++        policy,
++        || async { Ok(read_session_state(contract).await?.commit_data.is_none()) },
++        &|_, _| {},
++        &|| false,
++    )
++    .await
++    .map(|_| ())
++    .map_err(|e| format!("{}: {}", e.kind, e.message))
++}
++
+ #[cfg(not(feature = "single-wasm"))]
+ #[wasm_bindgen(start)]
+ pub fn start() {}
+diff --git a/bee_miner/src/wasm/mod.rs b/bee_miner/src/wasm/mod.rs
+index 12f44c6..c21dfa0 100644
+--- a/bee_miner/src/wasm/mod.rs
++++ b/bee_miner/src/wasm/mod.rs
+@@ -12,10 +12,14 @@ use serde::Deserialize;
+ use wasm_bindgen::prelude::wasm_bindgen;
+ use wasm_bindgen::JsError;
+ 
++mod delivery;
+ pub mod keys;
+ pub mod miner;
+ pub mod worker;
+ 
++/// NewGoblin §E.4: ids of the miner events already dispatched (bounded).
++const SEEN_EVENTS_MAX: usize = 256;
++
+ #[wasm_bindgen]
+ #[derive(Debug, Deserialize)]
+ #[allow(dead_code)]
+@@ -65,17 +69,32 @@ impl TryFrom<DecodedSessionStatusData> for String {
+     }
+ }
+ 
++/// NewGoblin §E.4: `created_at` has 1 s resolution, so events of the second
++/// already seen are kept (`>=`) and deduplicated by event id instead of being lost.
+ async fn get_miner_events(
+     contract: &mvsystem::miner::contract::Miner,
+     after_dt: u64,
++    seen: &mut std::collections::VecDeque<String>,
+ ) -> Result<Vec<DecodedMinerEvent>, JsError> {
+-    query_events(contract.context().clone(), contract.address(), contract.dapp_id(), Some(100))
+-        .await
+-        .map_err(|e| JsError::new(&format!("Query miner events ({e})")))?
++    let events =
++        query_events(contract.context().clone(), contract.address(), contract.dapp_id(), Some(100))
++            .await
++            .map_err(|e| JsError::new(&format!("Query miner events ({e})")))?;
++    let fresh = events
++        .iter()
++        .filter(|event| event.created_at >= after_dt && !seen.contains(&event.id))
++        .collect::<Vec<_>>();
++    let decoded = fresh
+         .iter()
+-        .filter(|event| event.created_at > after_dt)
+         .map(|event| {
+             DecodedMinerEvent::from_event(event, contract).map_err(|e| JsError::new(&e.to_string()))
+         })
+-        .collect::<Result<Vec<DecodedMinerEvent>, JsError>>()
++        .collect::<Result<Vec<DecodedMinerEvent>, JsError>>()?;
++    for event in fresh {
++        if seen.len() == SEEN_EVENTS_MAX {
++            seen.pop_front();
++        }
++        seen.push_back(event.id.clone());
++    }
++    Ok(decoded)
+ }
+diff --git a/bee_miner/src/wasm/worker.rs b/bee_miner/src/wasm/worker.rs
+index 2874589..558126e 100644
+--- a/bee_miner/src/wasm/worker.rs
++++ b/bee_miner/src/wasm/worker.rs
+@@ -1,14 +1,26 @@
++use std::cell::Cell;
+ use std::cell::RefCell;
+ use std::collections::VecDeque;
+ use std::fmt::Display;
+ use std::rc::Rc;
+ 
++use ackinacki_kit::contracts::delivery::PreparedMessage;
++use ackinacki_kit::contracts::deserialize::deserialize_option_u64;
++use ackinacki_kit::contracts::deserialize::deserialize_u128;
++use ackinacki_kit::contracts::deserialize::deserialize_u32;
++use ackinacki_kit::contracts::deserialize::deserialize_u64;
+ use ackinacki_kit::contracts::mvsystem;
++use ackinacki_kit::contracts::mvsystem::miner::contract::ParamsOfCancelSession;
+ use ackinacki_kit::contracts::mvsystem::miner::contract::ParamsOfSubmitSession;
+ use ackinacki_kit::contracts::mvsystem::miner::contract::ParamsOfVerifySession;
++use ackinacki_kit::contracts::mvsystem::miner::events::SessionIntervalData;
++use ackinacki_kit::contracts::mvsystem::miner::SessionInterval;
+ use ackinacki_kit::contracts::traits::AccountAccessor;
++use ackinacki_kit::contracts::traits::ContextAccessor;
+ use ackinacki_kit::contracts::traits::DecodeAccountData;
++use ackinacki_kit::contracts::traits::SendMessage;
+ use ackinacki_kit::shared::traits::guarded::AsyncGuarded;
++use ackinacki_kit::tvm_client::abi::CallSet;
+ use ackinacki_kit::tvm_client::abi::Signer;
+ use ackinacki_kit::tvm_client::crypto::KeyPair;
+ use bee_shared::miner::SessionProof;
+@@ -16,7 +28,10 @@ use bee_shared::miner::SessionSubmit;
+ use bee_shared::verifier;
+ use futures::channel::mpsc::UnboundedReceiver;
+ use futures::channel::mpsc::UnboundedSender;
++use futures::future::select;
++use futures::future::Either;
+ use futures::StreamExt;
++use serde::Deserialize;
+ use serde::Serialize;
+ use serde_json::json;
+ use wasm_bindgen::JsValue;
+@@ -26,8 +41,25 @@ use crate::core::context::ParamsOfCompute;
+ use crate::core::context::ResultOfGetMerkleSnapshot;
+ use crate::core::session_complexity::select_session_complexity;
+ use crate::core::session_complexity::MinerComplexityData;
++use crate::wasm::delivery;
++use crate::wasm::delivery::now_ms;
++use crate::wasm::delivery::DeliveryErr;
++use crate::wasm::delivery::DeliveryOk;
++use crate::wasm::delivery::SubmitPolicy;
+ use crate::wasm::DecodedSessionStatusData;
+ 
++/// `MAX_LEN_TAPS` (mvsystem modifiers.sol:73): `setCommitData` requires `_tapsSize <= 10`.
++const MAX_LEN_TAPS: u128 = 10;
++/// Account reads are retried this many times before the session gives up (W1).
++const READ_ATTEMPTS: u32 = 3;
++/// Poll period of the chain fallbacks (interval, root settle).
++const CHAIN_POLL_MS: u32 = 3_000;
++/// How long to wait for `TapSucceed`/`TapFailed` once `acceptTap` is delivered.
++const RESULT_WAIT_MS: u64 = 90_000;
++/// The interval is emitted in the root's own transaction: once the root landed it is readable at
++/// once (event or `_commitInterval`), so this only absorbs indexing / read lag.
++const INTERVAL_WAIT_MS: u64 = 60_000;
++
+ #[derive(Clone)]
+ pub(crate) enum MinerCommand {
+     Stop,
+@@ -90,10 +122,212 @@ pub(crate) struct MinerWorker {
+     pub duration_ms: u64,
+     pub easy_complexity: u32,
+     pub hard_complexity: u32,
++    /// NewGoblin §E.1: sends go through their own context (60 s query timeout, 240 s expire).
++    pub send_contract: mvsystem::miner::contract::Miner,
++    /// NewGoblin §E.5: deadlines and backoff, set from JS.
++    pub policy: Rc<Cell<SubmitPolicy>>,
++    /// NewGoblin: set when JS frees the Miner. Its workers keep running, so they check it
++    /// before preparing or sending anything and end quietly.
++    pub dropped: Rc<Cell<bool>>,
++}
++
++// ---- NewGoblin W8: miner contract state relevant to a session ------------------------------
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub(crate) struct ChainInterval {
++    #[serde(deserialize_with = "deserialize_u64")]
++    pub first: u64,
++    #[serde(deserialize_with = "deserialize_u64")]
++    pub second: u64,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub(crate) struct ChainCommitInterval {
++    #[serde(rename(deserialize = "value0"))]
++    pub easy: ChainInterval,
++    #[serde(rename(deserialize = "value1"))]
++    pub hard: ChainInterval,
++}
++
++/// Decoded miner account data (`Miner.abi.json` fields). Serialized with plain names
++/// for `Miner.get_session_state()`.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub(crate) struct SessionState {
++    #[serde(rename(deserialize = "_seed"))]
++    pub seed: String,
++    #[serde(rename(deserialize = "_seedNext"))]
++    pub seed_next: String,
++    #[serde(rename(deserialize = "_easyComplexity"), deserialize_with = "deserialize_u32")]
++    pub easy_complexity: u32,
++    #[serde(rename(deserialize = "_hardComplexity"), deserialize_with = "deserialize_u32")]
++    pub hard_complexity: u32,
++    #[serde(rename(deserialize = "_easyComplexityOld"), deserialize_with = "deserialize_u32")]
++    pub easy_complexity_old: u32,
++    #[serde(rename(deserialize = "_hardComplexityOld"), deserialize_with = "deserialize_u32")]
++    pub hard_complexity_old: u32,
++    #[serde(rename(deserialize = "_commitData"), default)]
++    pub commit_data: Option<String>,
++    #[serde(rename(deserialize = "_commitInterval"), default)]
++    pub commit_interval: Option<ChainCommitInterval>,
++    #[serde(rename(deserialize = "_tapsSize"), deserialize_with = "deserialize_u128")]
++    pub taps_size: u128,
++    #[serde(rename(deserialize = "_mbiCur"), default, deserialize_with = "deserialize_option_u64")]
++    pub mbi_cur: Option<u64>,
++    #[serde(rename(deserialize = "_epochStart"), deserialize_with = "deserialize_u64")]
++    pub epoch_5m_start: u64,
++}
++
++impl SessionState {
++    /// `_commitData` equals our root data (hex, case-insensitive).
++    pub fn has_commit(&self, data_hex: &str) -> bool {
++        self.commit_data.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(data_hex))
++    }
++
++    fn complexity_data(&self) -> MinerComplexityData {
++        MinerComplexityData {
++            seed: self.seed.clone(),
++            next_seed: self.seed_next.clone(),
++            easy: self.easy_complexity,
++            hard: self.hard_complexity,
++            easy_old: self.easy_complexity_old,
++            hard_old: self.hard_complexity_old,
++        }
++    }
++}
++
++pub(crate) async fn read_session_state(
++    contract: &mvsystem::miner::contract::Miner,
++) -> Result<SessionState, String> {
++    contract.fetch_account().await.map_err(|e| format!("Fetch miner account data ({e})"))?;
++    let Some(data) = contract.async_guarded(|account| account.data.clone()).await else {
++        return Err("Miner account has no data".to_string());
++    };
++    let value = contract
++        .decode_account_data(data)
++        .map_err(|e| format!("Decode miner account data ({e})"))?;
++    serde_json::from_value::<SessionState>(value)
++        .map_err(|e| format!("Deserialize miner session state ({e})"))
++}
++
++async fn read_session_state_retry(
++    contract: &mvsystem::miner::contract::Miner,
++) -> Result<SessionState, String> {
++    let mut last = String::new();
++    for attempt in 0..READ_ATTEMPTS {
++        if attempt > 0 {
++            gloo_timers::future::TimeoutFuture::new(1_000).await;
++        }
++        match read_session_state(contract).await {
++            Ok(state) => return Ok(state),
++            Err(e) => last = e,
++        }
++    }
++    Err(last)
++}
++
++/// NewGoblin W2: the root may only be sent if the contract will verify the
++/// session against what we mined (seed, complexity) and accept the commit.
++pub(crate) fn preflight_check(
++    state: &SessionState,
++    seed: &str,
++    complexity: (u32, u32),
++    easy_leaves: usize,
++    hard_leaves: usize,
++) -> Result<(), String> {
++    if state.seed != seed {
++        return Err(format!("seed_changed: chain {} != mined {seed}", state.seed));
++    }
++    if state.commit_data.is_some() {
++        return Err("commit_pending: _commitData already set".to_string());
++    }
++    let old = (state.easy_complexity_old, state.hard_complexity_old);
++    if old != complexity {
++        return Err(format!("complexity_changed: chain {old:?} != mined {complexity:?}"));
++    }
++    if state.taps_size > MAX_LEN_TAPS {
++        return Err(format!("taps_full: _tapsSize {} > {MAX_LEN_TAPS}", state.taps_size));
++    }
++    // H6: with one leaf the contract asks for (0, 0) and get_proof(0, 0) fails (easy and hard).
++    if hard_leaves < 2 {
++        return Err(format!("too_few_taps: {hard_leaves} < 2"));
++    }
++    if easy_leaves < 2 {
++        return Err(format!("too_few_easy_leaves: {easy_leaves} < 2"));
++    }
++    Ok(())
++}
++
++/// NewGoblin W7: whether `cancelCommitData` may be sent. `own` = our root data: after a
++/// rejection or a proof failure only OUR commit may go (a commit of another session, e.g. of the
++/// Miner that replaced a freed one, must never be cancelled from here). `None` = any commit
++/// (an orphan found before mining or before a root).
++pub(crate) fn may_cancel(state: &SessionState, own: Option<&str>) -> bool {
++    match own {
++        Some(data_hex) => state.has_commit(data_hex),
++        None => state.commit_data.is_some(),
++    }
++}
++
++/// `_commitData` is cleared only by an accepted session or a cancel, and both rotate `_seed`;
++/// a lagging read from before the root still shows the session seed.
++pub(crate) fn accepted_on_chain(state: &SessionState, session_seed: &str) -> bool {
++    state.commit_data.is_none() && state.seed != session_seed
++}
++
++/// NewGoblin W9: `wasmResult` = `[success, proofs_valid, mining_dur u32 LE]` (Miner.sol:291-298).
++pub(crate) fn decode_verifier(wasm_result: &str) -> Option<serde_json::Value> {
++    let b = hex::decode(wasm_result.trim_start_matches("0x")).ok()?;
++    if b.len() < 6 {
++        return None;
++    }
++    Some(json!({
++        "success": b[0],
++        "proofs_valid": b[1],
++        "mining_dur": u32::from_le_bytes([b[2], b[3], b[4], b[5]]),
++    }))
++}
++
++/// What the session was mined and proven with (W9), for the accepted/rejected callbacks.
++#[derive(Debug, Clone, Default)]
++struct SessionDiag {
++    seed: String,
++    easy_complexity: u32,
++    hard_complexity: u32,
++    complexity_source: &'static str,
++    easy_count: u64,
++    hard_count: u64,
++    easy_interval: (u64, u64),
++    hard_interval: (u64, u64),
++    hard_first_ts: u64,
++    hard_last_ts: u64,
++    root_msg_id: String,
++    proof_msg_id: String,
++}
++
++impl SessionDiag {
++    fn to_json(&self) -> serde_json::Value {
++        json!({
++            "seed": self.seed,
++            "easy_complexity": self.easy_complexity,
++            "hard_complexity": self.hard_complexity,
++            "complexity_source": self.complexity_source,
++            "easy_count": self.easy_count,
++            "hard_count": self.hard_count,
++            "easy_interval": [self.easy_interval.0, self.easy_interval.1],
++            "hard_interval": [self.hard_interval.0, self.hard_interval.1],
++            "hard_first_ts": self.hard_first_ts,
++            "hard_last_ts": self.hard_last_ts,
++            // verifier v1 duration (bee_verifier lib.rs:85) vs the 0.19.6 note (n * 4.7)
++            "ts_blocks": self.hard_last_ts.saturating_sub(self.hard_first_ts) / 330,
++            "leaf_blocks": self.hard_count * 47 / 10,
++            "root_msg_id": self.root_msg_id,
++            "proof_msg_id": self.proof_msg_id,
++        })
++    }
+ }
+ 
+ pub(crate) async fn run(
+-    worker: MinerWorker,
++    mut worker: MinerWorker,
+     mut worker_receiver: UnboundedReceiver<MinerCommand>,
+     seeds_ref: Rc<RefCell<VecDeque<String>>>,
+     workers_ref: Rc<RefCell<Vec<MinerWorker>>>,
+@@ -109,20 +343,37 @@ pub(crate) async fn run(
+         ),
+     );
+ 
+-    // Resolve the complexity the contract will verify this seed against
+-    let session_in_flight = workers_ref
+-        .borrow()
+-        .iter()
+-        .any(|w| w.id != worker.id && w.status == MinerStatus::Submitting);
+-    let (easy_complexity, hard_complexity) =
+-        match get_session_complexity(&worker, session_in_flight).await {
+-            Ok(Some(complexity)) => complexity,
+-            Ok(None) => (worker.easy_complexity, worker.hard_complexity),
+-            Err(e) => {
+-                web_sys::console::error_1(&e.into());
+-                (worker.easy_complexity, worker.hard_complexity)
++    // NewGoblin H1 + W1: mine on the seed the contract holds now, with the complexity it
++    // will verify against; never fall back silently to the "current" complexity.
++    let queued_seed = worker.seed.clone();
++    let mut diag = SessionDiag::default();
++    match resolve_session(&worker, &workers_ref, &callback).await {
++        Ok((seed, easy, hard, source)) => {
++            seeds_ref.borrow_mut().retain(|s| s != &seed);
++            worker.seed = seed;
++            worker.easy_complexity = easy;
++            worker.hard_complexity = hard;
++            diag.complexity_source = source;
++        }
++        Err((action, message, corrupted)) => {
++            send_callback(
++                &callback,
++                CallbackData::data(
++                    action,
++                    Some(json!({"worker_id": worker.id, "message": message})),
++                ),
++            );
++            if !queued_seed.is_empty() {
++                seeds_ref.borrow_mut().push_front(queued_seed);
+             }
+-        };
++            shutdown_worker(&worker, &workers_ref, false, corrupted, &callback);
++            return;
++        }
++    }
++    let (easy_complexity, hard_complexity) = (worker.easy_complexity, worker.hard_complexity);
++    diag.seed = worker.seed.clone();
++    diag.easy_complexity = easy_complexity;
++    diag.hard_complexity = hard_complexity;
+ 
+     // Initialize miner cores
+     let mut time_core = MiningCore::new(worker.seed.clone(), worker.duration_ms, easy_complexity);
+@@ -198,89 +449,312 @@ pub(crate) async fn run(
+         ),
+     );
+ 
+-    let signer = Signer::Keys { keys: worker.keys.clone() };
+-    match submit_session_root(&worker, (&time_tree, &tap_tree), signer.clone()).await {
+-        Ok(_) => send_callback(
++    // NewGoblin W2: root preflight against the chain state.
++    let preflight = match read_session_state_retry(&worker.contract).await {
++        Ok(state) => preflight_check(
++            &state,
++            &worker.seed,
++            (easy_complexity, hard_complexity),
++            time_tree.leaves.len(),
++            tap_tree.leaves.len(),
++        )
++        .map_err(|e| (e, Some(state))),
++        Err(e) => Err((format!("state_unreadable: {e}"), None)),
++    };
++    if let Err((reason, state)) = preflight {
++        send_callback(
+             &callback,
+-            CallbackData::data("submit_session_root", Some(json!({"worker_id": worker.id}))),
+-        ),
++            CallbackData::data(
++                "preflight_failed",
++                Some(json!({
++                    "worker_id": worker.id,
++                    "reason": reason,
++                    "seed": worker.seed,
++                    "chain_seed": state.as_ref().map(|s| s.seed.clone()),
++                    "chain_complexity_old": state.as_ref()
++                        .map(|s| [s.easy_complexity_old, s.hard_complexity_old]),
++                    "mined_complexity": [easy_complexity, hard_complexity],
++                    "taps_size": state.as_ref().map(|s| s.taps_size as u64),
++                    "commit_pending": state.as_ref().map(|s| s.commit_data.is_some()),
++                })),
++            ),
++        );
++        let still_current = state.as_ref().is_none_or(|s| s.seed == worker.seed);
++        let mut corrupted = false;
++        if state.as_ref().is_some_and(|s| s.commit_data.is_some()) {
++            corrupted = !cancel_stale_commit(&worker, "preflight", None, &callback).await;
++        }
++        if still_current {
++            seeds_ref.borrow_mut().push_front(worker.seed.clone());
++        }
++        shutdown_worker(&worker, &workers_ref, false, corrupted, &callback);
++        return;
++    }
++
++    let signer = Signer::Keys { keys: worker.keys.clone() };
++    diag.easy_count = time_tree.leaves.len() as u64;
++    diag.hard_count = tap_tree.leaves.len() as u64;
++
++    // NewGoblin W3: sign the root once and deliver that same message.
++    let (root_params, data_hex) = match build_root(&worker, (&time_tree, &tap_tree)) {
++        Ok(v) => v,
+         Err(e) => {
+-            send_callback(
++            root_failed(&worker, &workers_ref, &seeds_ref, &callback, e, true, false);
++            return;
++        }
++    };
++    let root_msg = match prepare(&worker, "setCommitData", json!(root_params), signer.clone()).await
++    {
++        Ok(msg) => msg,
++        Err(e) => {
++            root_failed(&worker, &workers_ref, &seeds_ref, &callback, e, true, false);
++            return;
++        }
++    };
++    diag.root_msg_id = root_msg.message_id().to_string();
++    let policy = worker.policy.get();
++    let root_result = delivery::deliver(
++        worker.send_contract.context().clone(),
++        &root_msg,
++        "root",
++        now_ms() + policy.root_deadline_ms,
++        policy.epoch_deadline_ms,
++        policy,
++        || commit_is(&worker, &data_hex),
++        &|action, data| send_diag(&callback, worker.id, action, data),
++        &|| worker.dropped.get(),
++    )
++    .await;
++    if worker.dropped.get() {
++        return; // freed Miner: end quietly, no settle / cancel from a zombie worker
++    }
++
++    match root_result {
++        Ok(how) => {
++            if how == DeliveryOk::ConfirmedOnChain {
++                send_callback(
++                    &callback,
++                    CallbackData::data(
++                        "root_confirmed_on_chain",
++                        Some(
++                            json!({"worker_id": worker.id, "message_id": diag.root_msg_id, "late": false}),
++                        ),
++                    ),
++                );
++            }
++        }
++        // NewGoblin W4: decide from the chain what the failed root left behind.
++        Err(err) => match settle_root(&worker, &root_msg, &data_hex, &err).await {
++            RootSettle::Landed => send_callback(
+                 &callback,
+-                CallbackData::error(
+-                    "submit_session_root",
+-                    "Submit session root failed",
+-                    Some(json!({"worker_id": worker.id, "message": e})),
++                CallbackData::data(
++                    "root_confirmed_on_chain",
++                    Some(
++                        json!({"worker_id": worker.id, "message_id": diag.root_msg_id, "late": true}),
++                    ),
+                 ),
+-            );
++            ),
++            RootSettle::NotLanded => {
++                // The contract never saw it: the seed is still current (H1).
++                root_failed(&worker, &workers_ref, &seeds_ref, &callback, err.message, true, false);
++                return;
++            }
++            RootSettle::Foreign => {
++                let ok = cancel_stale_commit(&worker, "root_failed", None, &callback).await;
++                root_failed(&worker, &workers_ref, &seeds_ref, &callback, err.message, false, !ok);
++                return;
++            }
++            RootSettle::Unknown(e) => {
++                let message = format!("{}; state unknown ({e})", err.message);
++                root_failed(&worker, &workers_ref, &seeds_ref, &callback, message, false, true);
++                return;
++            }
++        },
++    }
++    send_callback(
++        &callback,
++        CallbackData::data(
++            "submit_session_root",
++            Some(json!({"worker_id": worker.id, "message_id": diag.root_msg_id})),
++        ),
++    );
++
++    // NewGoblin W5: wait for the interval with a deadline and a chain fallback. Once the root
++    // landed, the epoch end no longer bounds anything: acceptTap handles a window rollover
++    // itself (Miner.sol:267-277), so a proof landing in the next window still counts.
++    let interval_deadline = now_ms() + INTERVAL_WAIT_MS;
++    let interval =
++        match wait_interval(&worker, &mut worker_receiver, &data_hex, interval_deadline, &callback)
++            .await
++        {
++            Ok(interval) => interval,
++            Err(message) => {
++                proof_failed(&worker, &workers_ref, &callback, &data_hex, message).await;
++                return;
++            }
++        };
++    diag.easy_interval = (interval.easy.start, interval.easy.end);
++    diag.hard_interval = (interval.hard.start, interval.hard.end);
+ 
+-            shutdown_worker(&worker, &workers_ref, true, true, &callback);
++    // NewGoblin W6: build and sign acceptTap once, deliver that same message.
++    let cores = (&mut time_core, &mut tap_core);
++    let trees = (&time_tree, &tap_tree);
++    let proof_params = match build_proof(&worker, cores, trees, &interval, &mut diag) {
++        Ok(p) => p,
++        Err(e) => {
++            proof_failed(&worker, &workers_ref, &callback, &data_hex, e).await;
+             return;
+         }
++    };
++    let proof_msg = match prepare(&worker, "acceptTap", json!(proof_params), signer.clone()).await {
++        Ok(msg) => msg,
++        Err(e) => {
++            proof_failed(&worker, &workers_ref, &callback, &data_hex, e).await;
++            return;
++        }
++    };
++    diag.proof_msg_id = proof_msg.message_id().to_string();
++
++    // A result event received while delivering is kept here (it also confirms delivery).
++    let receiver = RefCell::new(worker_receiver);
++    let result: RefCell<Option<MinerCommand>> = RefCell::new(None);
++    let policy = worker.policy.get();
++    // W6: proof_deadline from the interval, and the message expiry; not the epoch end.
++    let proof_result = delivery::deliver(
++        worker.send_contract.context().clone(),
++        &proof_msg,
++        "proof",
++        now_ms() + policy.proof_deadline_ms,
++        0,
++        policy,
++        || async {
++            if take_result(&mut receiver.borrow_mut(), &result) {
++                return Ok(true);
++            }
++            // `_commitData` is cleared only by an accepted session or a cancel, and both rotate
++            // `_seed`; a lagging read from before the root still shows our seed.
++            let state = read_session_state(&worker.contract).await?;
++            Ok(accepted_on_chain(&state, &worker.seed))
++        },
++        &|action, data| send_diag(&callback, worker.id, action, data),
++        &|| worker.dropped.get(),
++    )
++    .await;
++    let mut worker_receiver = receiver.into_inner();
++    if worker.dropped.get() {
++        return;
++    }
++    if let Err(err) = proof_result {
++        proof_failed(&worker, &workers_ref, &callback, &data_hex, err.message).await;
++        return;
+     }
++    send_callback(
++        &callback,
++        CallbackData::data(
++            "submit_session_proof",
++            Some(json!({"worker_id": worker.id, "message_id": diag.proof_msg_id})),
++        ),
++    );
+ 
+-    // Wait for session interval event
+-    while let Some(command) = worker_receiver.next().await {
+-        match command {
+-            MinerCommand::SendSessionInterval(data) => {
+-                let cores = (&mut time_core, &mut tap_core);
+-                let trees = (&time_tree, &tap_tree);
+-                match submit_session_proof(&worker, cores, trees, data, signer.clone()).await {
+-                    Ok(_) => {
+-                        send_callback(
+-                            &callback,
+-                            CallbackData::data(
+-                                "submit_session_proof",
+-                                Some(json!({"worker_id": worker.id})),
+-                            ),
+-                        );
+-                    }
+-                    Err(e) => {
+-                        send_callback(
+-                            &callback,
+-                            CallbackData::error(
+-                                "submit_session_proof",
+-                                "Submit session root failed",
+-                                Some(json!({"worker_id": worker.id, "message": e})),
+-                            ),
+-                        );
+-                        break;
+-                    }
++    // Session result: TapSucceed / TapFailed via the event thread.
++    let mut result = result.into_inner();
++    if result.is_none() {
++        let deadline = now_ms() + RESULT_WAIT_MS;
++        while now_ms() < deadline {
++            let left = deadline.saturating_sub(now_ms()).min(CHAIN_POLL_MS as u64) as u32;
++            let next = Box::pin(worker_receiver.next());
++            let tick = Box::pin(gloo_timers::future::TimeoutFuture::new(left.max(1)));
++            match select(next, tick).await {
++                Either::Left((Some(cmd @ MinerCommand::ProcessSessionAccepted { .. }), _))
++                | Either::Left((Some(cmd @ MinerCommand::ProcessSessionRejected { .. }), _)) => {
++                    result = Some(cmd);
++                    break;
+                 }
++                Either::Left((Some(_), _)) => {}
++                Either::Left((None, _)) => break,
++                Either::Right(_) => {}
+             }
+-            MinerCommand::ProcessSessionAccepted { wasm_result } => {
++        }
++    }
++
++    match result {
++        Some(MinerCommand::ProcessSessionAccepted { wasm_result }) => {
++            send_callback(
++                &callback,
++                CallbackData::data(
++                    "session_accepted",
++                    Some(json!({
++                        "worker_id": worker.id,
++                        "result": wasm_result,
++                        "result_source": "event",
++                        "verifier": decode_verifier(&wasm_result),
++                        "session": diag.to_json(),
++                    })),
++                ),
++            );
++            shutdown_worker(&worker, &workers_ref, true, false, &callback);
++        }
++        Some(MinerCommand::ProcessSessionRejected { wasm_result }) => {
++            send_callback(
++                &callback,
++                CallbackData::error(
++                    "session_rejected",
++                    "Session rejected",
++                    Some(json!({
++                        "worker_id": worker.id,
++                        "result": wasm_result,
++                        "result_source": "event",
++                        "verifier": decode_verifier(&wasm_result),
++                        "session": diag.to_json(),
++                    })),
++                ),
++            );
++            // NewGoblin W7: a rejected session keeps `_commitData` (Miner.sol:306-311).
++            let ok = cancel_stale_commit(&worker, "rejected", Some(&data_hex), &callback).await;
++            shutdown_worker(&worker, &workers_ref, true, !ok, &callback);
++        }
++        _ => {
++            // NewGoblin: no result event (event poll lagging?): ask the chain. An accepted
++            // session clears our commit and rotates the seed; a rejected one keeps the commit.
++            let state = read_session_state_retry(&worker.contract).await;
++            if state.as_ref().is_ok_and(|s| accepted_on_chain(s, &worker.seed)) {
+                 send_callback(
+                     &callback,
+                     CallbackData::data(
+                         "session_accepted",
+-                        Some(json!({"worker_id": worker.id, "result": wasm_result})),
+-                    ),
+-                );
+-                break;
+-            }
+-            MinerCommand::ProcessSessionRejected { wasm_result } => {
+-                send_callback(
+-                    &callback,
+-                    CallbackData::error(
+-                        "session_rejected",
+-                        "Session rejected",
+-                        Some(json!({"worker_id": worker.id, "result": wasm_result})),
++                        Some(json!({
++                            "worker_id": worker.id,
++                            "result": null,
++                            "result_source": "chain",
++                            "verifier": null,
++                            "session": diag.to_json(),
++                        })),
+                     ),
+                 );
+-                break;
++                shutdown_worker(&worker, &workers_ref, true, false, &callback);
++            } else {
++                let message = "Session result not received".to_string();
++                proof_failed(&worker, &workers_ref, &callback, &data_hex, message).await;
+             }
+-            _ => {}
+         }
+     }
+-
+-    // Update worker status and remove from workers
+-    shutdown_worker(&worker, &workers_ref, true, false, &callback);
+ }
+ 
+ fn send_callback(callback: &js_sys::Function, arg: CallbackData) {
+     let _ = callback.call1(&JsValue::NULL, &serde_json::to_string(&arg).unwrap().into());
+ }
+ 
++/// NewGoblin W10: diagnostic callback with the worker id added.
++fn send_diag(
++    callback: &js_sys::Function,
++    worker_id: u64,
++    action: &str,
++    mut data: serde_json::Value,
++) {
++    data["worker_id"] = json!(worker_id);
++    send_callback(callback, CallbackData::data(action, Some(data)));
++}
++
+ fn update_worker_status(
+     worker_id: u64,
+     workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
+@@ -322,33 +796,281 @@ fn shutdown_worker(
+     );
+ }
+ 
+-/// Complexity the contract will verify a session on `worker.seed` against,
+-/// read from the miner account data. See [`select_session_complexity`].
+-async fn get_session_complexity(
++/// NewGoblin H1/W1: seed and complexity from the chain. A commit left on chain
++/// (sessions are sequential, so it is an orphan) is cancelled first.
++/// `Err((callback action, message, miner_state_corrupted))`.
++async fn resolve_session(
+     worker: &MinerWorker,
+-    session_in_flight: bool,
+-) -> Result<Option<(u32, u32)>, String> {
+-    worker.contract.fetch_account().await.map_err(|e| format!("Fetch miner account data ({e})"))?;
++    workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
++    callback: &js_sys::Function,
++) -> Result<(String, u32, u32, &'static str), (&'static str, String, bool)> {
++    let unknown = |e: String| ("complexity_unknown", e, false);
++    let mut state = read_session_state_retry(&worker.contract).await.map_err(unknown)?;
++    if state.commit_data.is_some() {
++        if !cancel_stale_commit(worker, "before_start", None, callback).await {
++            let message = "Stale commit could not be cancelled".to_string();
++            return Err(("stale_commit_uncancellable", message, true));
++        }
++        state = read_session_state_retry(&worker.contract).await.map_err(unknown)?;
++    }
++    let session_in_flight = workers_ref
++        .borrow()
++        .iter()
++        .any(|w| w.id != worker.id && w.status == MinerStatus::Submitting);
++    let data = state.complexity_data();
++    let Some((easy, hard)) = select_session_complexity(&state.seed, &data, session_in_flight)
++    else {
++        return Err(unknown("No complexity for the chain seed".to_string()));
++    };
++    let source = if (easy, hard) == (data.easy_old, data.hard_old) { "old" } else { "current" };
++    Ok((state.seed, easy, hard, source))
++}
+ 
+-    let Some(data) = worker.contract.async_guarded(|account| account.data.clone()).await else {
+-        return Err("Miner account has no data".to_string());
++async fn commit_is(worker: &MinerWorker, data_hex: &str) -> Result<bool, String> {
++    Ok(read_session_state(&worker.contract).await?.has_commit(data_hex))
++}
++
++async fn prepare(
++    worker: &MinerWorker,
++    function_name: &str,
++    input: serde_json::Value,
++    signer: Signer,
++) -> Result<PreparedMessage, String> {
++    if worker.dropped.get() {
++        return Err("Miner dropped".to_string());
++    }
++    let call_set =
++        CallSet { function_name: function_name.to_string(), header: None, input: Some(input) };
++    worker
++        .send_contract
++        .prepare_message(Some(call_set), None, signer)
++        .await
++        .map_err(|e| format!("Prepare `{function_name}` message ({e})"))
++}
++
++/// Root failed for good: report it (stage root) and end the session.
++fn root_failed(
++    worker: &MinerWorker,
++    workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
++    seeds_ref: &Rc<RefCell<VecDeque<String>>>,
++    callback: &js_sys::Function,
++    message: String,
++    seed_still_current: bool,
++    corrupted: bool,
++) {
++    send_callback(
++        callback,
++        CallbackData::error(
++            "submit_session_root",
++            "Submit session root failed",
++            Some(json!({"worker_id": worker.id, "message": message})),
++        ),
++    );
++    if seed_still_current {
++        seeds_ref.borrow_mut().push_front(worker.seed.clone());
++    }
++    shutdown_worker(worker, workers_ref, !seed_still_current, corrupted, callback);
++}
++
++/// After the root landed: report a proof-stage failure, cancel the commit (W7), end.
++async fn proof_failed(
++    worker: &MinerWorker,
++    workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
++    callback: &js_sys::Function,
++    data_hex: &str,
++    message: String,
++) {
++    send_callback(
++        callback,
++        CallbackData::error(
++            "submit_session_proof",
++            "Submit session proof failed",
++            Some(json!({"worker_id": worker.id, "message": message})),
++        ),
++    );
++    let ok = cancel_stale_commit(worker, "proof_failed", Some(data_hex), callback).await;
++    shutdown_worker(worker, workers_ref, true, !ok, callback);
++}
++
++enum RootSettle {
++    Landed,
++    NotLanded,
++    Foreign,
++    Unknown(String),
++}
++
++/// NewGoblin W4. A root that may still land (ambiguous / fatal / deadline / expired) is
++/// decided only once its `expire` has passed (+3 s for the account read to catch up);
++/// one that ran and failed after a short grace; one never sent at once.
++async fn settle_root(
++    worker: &MinerWorker,
++    msg: &PreparedMessage,
++    data_hex: &str,
++    err: &DeliveryErr,
++) -> RootSettle {
++    let settle_at = match (err.kind, msg.expires_at()) {
++        ("not_sent", _) => 0,
++        ("executed_failed", _) => now_ms() + 10_000,
++        (_, Some(expires_at)) => expires_at as u64 * 1000 + 3_000,
++        (_, None) => now_ms() + delivery::MESSAGE_EXPIRATION_MS as u64,
+     };
++    let give_up_at = settle_at.max(now_ms()) + 30_000;
++    loop {
++        match read_session_state(&worker.contract).await {
++            Ok(state) if state.has_commit(data_hex) => return RootSettle::Landed,
++            Ok(state) if now_ms() >= settle_at => {
++                return if state.commit_data.is_none() {
++                    RootSettle::NotLanded
++                } else {
++                    RootSettle::Foreign
++                };
++            }
++            Ok(_) => {}
++            Err(e) if now_ms() >= give_up_at => return RootSettle::Unknown(e),
++            Err(_) => {}
++        }
++        gloo_timers::future::TimeoutFuture::new(CHAIN_POLL_MS).await;
++    }
++}
+ 
+-    let value = worker
+-        .contract
+-        .decode_account_data(data)
+-        .map_err(|e| format!("Decode miner account data ({e})"))?;
+-    let data = serde_json::from_value::<MinerComplexityData>(value)
+-        .map_err(|e| format!("Deserialize miner complexity data ({e})"))?;
++/// NewGoblin W5: `SessionInterval` from the event thread, or from `_commitInterval`.
++async fn wait_interval(
++    worker: &MinerWorker,
++    worker_receiver: &mut UnboundedReceiver<MinerCommand>,
++    data_hex: &str,
++    deadline: u64,
++    callback: &js_sys::Function,
++) -> Result<SessionIntervalData, String> {
++    // Account reads may lag the send result: our commit missing only counts once it was seen.
++    let mut commit_seen = false;
++    loop {
++        let now = now_ms();
++        if now >= deadline {
++            return Err("Session interval not received before the deadline".to_string());
++        }
++        let left = (deadline - now).min(CHAIN_POLL_MS as u64) as u32;
++        let next = Box::pin(worker_receiver.next());
++        let tick = Box::pin(gloo_timers::future::TimeoutFuture::new(left.max(1)));
++        match select(next, tick).await {
++            Either::Left((Some(MinerCommand::SendSessionInterval(data)), _)) => return Ok(data),
++            Either::Left((Some(_), _)) => {}
++            Either::Left((None, _)) => return Err("Worker channel closed".to_string()),
++            Either::Right(_) => {
++                let Ok(state) = read_session_state(&worker.contract).await else { continue };
++                if !state.has_commit(data_hex) {
++                    if commit_seen || state.commit_data.is_some() {
++                        return Err("Own commit is no longer on chain".to_string());
++                    }
++                    continue;
++                }
++                commit_seen = true;
++                if let Some(ci) = state.commit_interval {
++                    send_callback(
++                        callback,
++                        CallbackData::data(
++                            "interval_from_chain",
++                            Some(json!({
++                                "worker_id": worker.id,
++                                "easy": [ci.easy.first, ci.easy.second],
++                                "hard": [ci.hard.first, ci.hard.second],
++                            })),
++                        ),
++                    );
++                    return Ok(SessionIntervalData {
++                        easy: SessionInterval { start: ci.easy.first, end: ci.easy.second },
++                        hard: SessionInterval { start: ci.hard.first, end: ci.hard.second },
++                        worker_id: worker.id,
++                    });
++                }
++            }
++        }
++    }
++}
++
++/// Moves a pending accepted/rejected command out of the channel into `slot`.
++fn take_result(
++    receiver: &mut UnboundedReceiver<MinerCommand>,
++    slot: &RefCell<Option<MinerCommand>>,
++) -> bool {
++    if slot.borrow().is_some() {
++        return true;
++    }
++    while let Ok(cmd) = receiver.try_recv() {
++        if matches!(
++            cmd,
++            MinerCommand::ProcessSessionAccepted { .. }
++                | MinerCommand::ProcessSessionRejected { .. }
++        ) {
++            *slot.borrow_mut() = Some(cmd);
++            return true;
++        }
++    }
++    false
++}
+ 
+-    Ok(select_session_complexity(&worker.seed, &data, session_in_flight))
++/// NewGoblin W7: `cancelCommitData`, delivered until `_commitData` is gone.
++/// Not bounded by the epoch: a stale commit blocks every later session.
++pub(crate) async fn cancel_stale_commit(
++    worker: &MinerWorker,
++    reason: &str,
++    own: Option<&str>,
++    callback: &js_sys::Function,
++) -> bool {
++    if worker.dropped.get() {
++        return false;
++    }
++    let policy = worker.policy.get();
++    let params = ParamsOfCancelSession { app_id: worker.app_id.clone() };
++    let signer = Signer::Keys { keys: worker.keys.clone() };
++    match read_session_state_retry(&worker.contract).await {
++        // Nothing (of ours) to cancel, e.g. accepted after all: send nothing.
++        Ok(state) if !may_cancel(&state, own) => {
++            return own.is_some() || state.commit_data.is_none()
++        }
++        Ok(_) => {}
++        // Ownership cannot be checked: never cancel blind after a session of ours.
++        Err(_) if own.is_some() => return false,
++        Err(_) => {}
++    }
++    let result = match prepare(worker, "cancelCommitData", json!(params), signer).await {
++        Ok(msg) => delivery::deliver(
++            worker.send_contract.context().clone(),
++            &msg,
++            "cancel",
++            now_ms() + policy.root_deadline_ms,
++            0,
++            policy,
++            || async { Ok(read_session_state(&worker.contract).await?.commit_data.is_none()) },
++            &|action, data| send_diag(callback, worker.id, action, data),
++            &|| worker.dropped.get(),
++        )
++        .await
++        .map(|_| msg.message_id().to_string())
++        .map_err(|e| e.message),
++        Err(e) => Err(e),
++    };
++    let ok = result.is_ok();
++    send_callback(
++        callback,
++        CallbackData::data(
++            "stale_commit_cancelled",
++            Some(json!({
++                "worker_id": worker.id,
++                "reason": reason,
++                "ok": ok,
++                "message_id": result.as_ref().ok(),
++                "error": result.as_ref().err(),
++            })),
++        ),
++    );
++    ok
+ }
+ 
+-async fn submit_session_root(
++/// `setCommitData` params and the hex of `data` (what `_commitData` will hold).
++fn build_root(
+     worker: &MinerWorker,
+     trees: (&ResultOfGetMerkleSnapshot, &ResultOfGetMerkleSnapshot),
+-    signer: Signer,
+-) -> Result<(), String> {
++) -> Result<(ParamsOfSubmitSession, String), String> {
+     let easy_params =
+         SessionSubmit { root: trees.0.root.clone(), leaves_count: trees.0.leaves.len() as u64 };
+     let hard_params =
+@@ -356,33 +1078,28 @@ async fn submit_session_root(
+ 
+     let submit_session_params_bytes = verifier::combine_bytes(&[&easy_params, &hard_params])
+         .map_err(|e| format!("Serialize submit session params to bytes ({e})"))?;
++    let data = hex::encode(submit_session_params_bytes);
+ 
+-    // Send submit session params to miner
+-    worker
+-        .contract
+-        .submit_session(
+-            ParamsOfSubmitSession {
+-                app_id: worker.app_id.clone(),
+-                easy_count: easy_params.leaves_count,
+-                hard_count: hard_params.leaves_count,
+-                worker_id: worker.id,
+-                data: hex::encode(submit_session_params_bytes),
+-            },
+-            signer,
+-        )
+-        .await
+-        .map_err(|e| format!("Submit miner session ({e})"))?;
+-
+-    Ok(())
++    Ok((
++        ParamsOfSubmitSession {
++            app_id: worker.app_id.clone(),
++            easy_count: easy_params.leaves_count,
++            hard_count: hard_params.leaves_count,
++            worker_id: worker.id,
++            data: data.clone(),
++        },
++        data,
++    ))
+ }
+ 
+-async fn submit_session_proof(
++/// `acceptTap` params (proof ranges unchanged from upstream: half-open `[first, second)`).
++fn build_proof(
+     worker: &MinerWorker,
+     cores: (&mut MiningCore, &mut MiningCore),
+     trees: (&ResultOfGetMerkleSnapshot, &ResultOfGetMerkleSnapshot),
+-    interval: mvsystem::miner::events::SessionIntervalData,
+-    signer: Signer,
+-) -> Result<(), String> {
++    interval: &SessionIntervalData,
++    diag: &mut SessionDiag,
++) -> Result<ParamsOfVerifySession, String> {
+     let easy_core = cores.0;
+     let hard_core = cores.1;
+     let hard_tree = trees.1;
+@@ -428,6 +1145,8 @@ async fn submit_session_proof(
+             leaves_data: proof.selected_leaves_data.to_vec(),
+         }
+     };
++    diag.hard_first_ts = hard_first_proof_params.leaves_data.first().map_or(0, |l| l.timestamp);
++    diag.hard_last_ts = hard_last_proof_params.leaves_data.first().map_or(0, |l| l.timestamp);
+ 
+     let verify_session_params_bytes = verifier::combine_bytes(&[
+         &easy_proof_params,
+@@ -440,26 +1159,137 @@ async fn submit_session_proof(
+     let event_data = String::try_from(DecodedSessionStatusData { worker_id: worker.id })
+         .map_err(|e| format!("Serialize event data ({e})"))?;
+ 
+-    // Send verify session params to miner
+-    worker
+-        .contract
+-        .verify_session(
+-            ParamsOfVerifySession {
+-                app_id: worker.app_id.clone(),
+-                data: hex::encode(verify_session_params_bytes),
+-                success_event_address: vec![
+-                    mvsystem::miner::events::MinerEvent::SessionAccepted.to_address()
+-                ],
+-                success_event_data: vec![event_data.clone()],
+-                error_event_address: vec![
+-                    mvsystem::miner::events::MinerEvent::SessionRejected.to_address()
+-                ],
+-                error_event_data: vec![event_data.clone()],
+-            },
+-            signer.clone(),
+-        )
+-        .await
+-        .map_err(|e| format!("Verify miner session ({e})"))?;
++    Ok(ParamsOfVerifySession {
++        app_id: worker.app_id.clone(),
++        data: hex::encode(verify_session_params_bytes),
++        success_event_address: vec![
++            mvsystem::miner::events::MinerEvent::SessionAccepted.to_address()
++        ],
++        success_event_data: vec![event_data.clone()],
++        error_event_address: vec![mvsystem::miner::events::MinerEvent::SessionRejected.to_address()],
++        error_event_data: vec![event_data],
++    })
++}
+ 
+-    Ok(())
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const MINER_DATA: &str = include_str!("../core/fixtures/miner_account_data.json");
++
++    fn state() -> SessionState {
++        serde_json::from_str(MINER_DATA).unwrap()
++    }
++
++    #[test]
++    fn session_state_parses_real_account_data() {
++        let s = state();
++        assert_eq!(s.seed, "0x00000000000000000000000000000000000000000000000000000000937eeff6");
++        assert_eq!((s.easy_complexity, s.hard_complexity), (10, 12));
++        assert_eq!((s.easy_complexity_old, s.hard_complexity_old), (10, 11));
++        assert_eq!(s.commit_data, None);
++        assert_eq!(s.commit_interval, None);
++        assert_eq!((s.taps_size, s.mbi_cur, s.epoch_5m_start), (0, Some(30), 22968000));
++    }
++
++    #[test]
++    fn session_state_parses_a_pending_commit() {
++        let mut v: serde_json::Value = serde_json::from_str(MINER_DATA).unwrap();
++        v["_commitData"] = json!("0a0B");
++        v["_commitInterval"] = json!({
++            "value0": {"first": "3", "second": "43"},
++            "value1": {"first": "0", "second": "11"}
++        });
++        v["_mbiCur"] = serde_json::Value::Null;
++        let s: SessionState = serde_json::from_value(v).unwrap();
++        assert!(s.has_commit("0A0b"));
++        assert!(!s.has_commit("0a0c"));
++        let ci = s.commit_interval.unwrap();
++        assert_eq!((ci.easy.first, ci.easy.second, ci.hard.first, ci.hard.second), (3, 43, 0, 11));
++        assert_eq!(s.mbi_cur, None);
++        // get_session_state() output uses plain names
++        let out = serde_json::to_value(&s).unwrap();
++        assert_eq!(out["commit_interval"]["hard"]["second"], json!(11));
++        assert_eq!(out["seed_next"], json!(s.seed_next));
++    }
++
++    #[test]
++    fn preflight_accepts_a_clean_state_and_names_every_mismatch() {
++        let s = state();
++        let seed = s.seed.clone();
++        assert_eq!(preflight_check(&s, &seed, (10, 11), 5, 5), Ok(()));
++        assert!(preflight_check(&s, &s.seed_next, (10, 11), 5, 5)
++            .unwrap_err()
++            .starts_with("seed_changed"));
++        // mined with the "current" complexity while the contract verifies with Old (H2)
++        assert!(preflight_check(&s, &seed, (10, 12), 5, 5)
++            .unwrap_err()
++            .starts_with("complexity_changed"));
++        assert!(preflight_check(&s, &seed, (10, 11), 5, 1)
++            .unwrap_err()
++            .starts_with("too_few_taps"));
++        assert!(preflight_check(&s, &seed, (10, 11), 1, 5)
++            .unwrap_err()
++            .starts_with("too_few_easy_leaves"));
++        let mut c = s.clone();
++        c.commit_data = Some("00".into());
++        assert!(preflight_check(&c, &seed, (10, 11), 5, 5)
++            .unwrap_err()
++            .starts_with("commit_pending"));
++        let mut t = s.clone();
++        t.taps_size = 10;
++        assert_eq!(preflight_check(&t, &seed, (10, 11), 5, 5), Ok(()));
++        t.taps_size = 11;
++        assert!(preflight_check(&t, &seed, (10, 11), 5, 5).unwrap_err().starts_with("taps_full"));
++    }
++
++    #[test]
++    fn only_our_own_commit_is_cancelled_after_a_session() {
++        let mut s = state();
++        assert!(!may_cancel(&s, None)); // no commit at all
++        assert!(!may_cancel(&s, Some("aa")));
++        s.commit_data = Some("AA".into());
++        assert!(may_cancel(&s, None)); // orphan before start / preflight: any commit
++        assert!(may_cancel(&s, Some("aa"))); // ours (case-insensitive)
++        assert!(!may_cancel(&s, Some("bb"))); // another session's commit: never
++    }
++
++    #[test]
++    fn accepted_on_chain_needs_cleared_commit_and_rotated_seed() {
++        let mut s = state();
++        let seed = s.seed.clone();
++        assert!(!accepted_on_chain(&s, &seed)); // lagging pre-root read: same seed, no commit
++        s.seed = s.seed_next.clone();
++        assert!(accepted_on_chain(&s, &seed));
++        s.commit_data = Some("aa".into());
++        assert!(!accepted_on_chain(&s, &seed)); // a commit is there (rejected keeps it)
++    }
++
++    #[test]
++    fn verifier_result_is_decoded_like_the_contract() {
++        // mainnet rejection evidence (design §C.2): 01 00 23 00 00 00
++        assert_eq!(
++            decode_verifier("010023000000"),
++            Some(json!({"success": 1, "proofs_valid": 0, "mining_dur": 35}))
++        );
++        assert_eq!(
++            decode_verifier("0x0101e8030000ff"),
++            Some(json!({"success": 1, "proofs_valid": 1, "mining_dur": 1000}))
++        );
++        assert_eq!(decode_verifier("0100"), None);
++        assert_eq!(decode_verifier("zz"), None);
++    }
++
++    #[test]
++    fn session_diag_reports_both_duration_estimates() {
++        let d = SessionDiag {
++            hard_count: 8,
++            hard_first_ts: 1_000,
++            hard_last_ts: 1_000 + 35 * 330 + 100,
++            ..Default::default()
++        };
++        let j = d.to_json();
++        assert_eq!(j["ts_blocks"], json!(35));
++        assert_eq!(j["leaf_blocks"], json!(37));
++    }
+ }

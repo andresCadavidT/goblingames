@@ -1,0 +1,573 @@
+NewGoblin patch 0002 on gosh-sh/bee-engine v6.0.0 (015bc466613e7b7c41f272dc16ba0cacbf0e4d93), applied after 0001.
+Premine mode: the next session is mined while one is delivered, held, then released or discarded from JS (bee_miner/src/wasm only).
+Hunk-by-hunk explanation: 0002-newgoblin-premine.md. Design: docs/superpowers/specs/2026-10-31-pipelined-sessions-design.md §1.
+License: AGPL-3.0-only (same as upstream).
+
+diff --git a/bee_miner/src/wasm/miner.rs b/bee_miner/src/wasm/miner.rs
+index 7feacbf..36eb811 100644
+--- a/bee_miner/src/wasm/miner.rs
++++ b/bee_miner/src/wasm/miner.rs
+@@ -31,6 +31,7 @@ use crate::graphql::GqlResponse;
+ use crate::wasm::delivery;
+ use crate::wasm::delivery::SubmitPolicy;
+ use crate::wasm::get_miner_events;
++use crate::wasm::premine;
+ use crate::wasm::worker;
+ use crate::wasm::worker::read_session_state;
+ use crate::wasm::worker::MinerCommand;
+@@ -56,6 +57,10 @@ pub struct Miner {
+     complexity: Rc<Cell<(u32, u32)>>,
+     workers: Rc<RefCell<Vec<MinerWorker>>>,
+     dropped: Rc<Cell<bool>>,
++    /// NewGoblin premine: `release_submit()` / `discard_premine()` signals for the premine
++    /// worker, reset by every `premine()`.
++    premine_release: Rc<Cell<bool>>,
++    premine_discard: Rc<Cell<bool>>,
+ }
+ 
+ impl Drop for Miner {
+@@ -141,6 +146,9 @@ impl Miner {
+             complexity: Rc::new(Cell::new(complexity)),
+             workers: Rc::new(RefCell::new(Vec::new())),
+             dropped: Rc::new(Cell::new(false)),
++            // NewGoblin premine
++            premine_release: Rc::new(Cell::new(false)),
++            premine_discard: Rc::new(Cell::new(false)),
+         };
+ 
+         // Start internal thread, which will catch miner contract events
+@@ -256,6 +264,11 @@ impl Miner {
+             send_contract: self.send_contract.clone(),
+             policy: self.policy.clone(),
+             dropped: self.dropped.clone(),
++            // NewGoblin premine: a normal worker never reads these.
++            premine: false,
++            in_flight_seed: String::new(),
++            premine_release: self.premine_release.clone(),
++            premine_discard: self.premine_discard.clone(),
+         };
+ 
+         let seeds_ref = self.seeds.clone();
+@@ -404,16 +417,114 @@ impl Miner {
+             .map(|edge| GraphqlBlockData { seq_no: edge.node.seq_no })
+             .ok_or_else(|| JsError::new("No blocks returned"))
+     }
++
++    /// NewGoblin premine: `true` while exactly one worker is alive and it is submitting.
++    #[wasm_bindgen(js_name = can_premine)]
++    pub fn can_premine(&self) -> bool {
++        premine::can_premine(&self.statuses())
++    }
++
++    /// NewGoblin premine: like `start`, but the worker mines the session after the one being
++    /// submitted, without cancelling anything (`premine_resolved` / `premine_unsafe`), holds it
++    /// (`held`, `premine_ready`) and submits it only after `release_submit()`, once no other
++    /// worker is left (`premine_released`).
++    #[wasm_bindgen(js_name = premine)]
++    pub fn premine(&self, duration_ms: u32, callback: js_sys::Function) -> Result<(), JsError> {
++        if !self.can_premine() {
++            return Err(JsError::new("Premine needs one live worker, and it must be submitting"));
++        }
++        let in_flight_seed = self
++            .workers
++            .borrow()
++            .iter()
++            .find(|w| w.status == MinerStatus::Submitting)
++            .map(|w| w.seed.clone())
++            .unwrap_or_default();
++        self.premine_release.set(false);
++        self.premine_discard.set(false);
++
++        // Same worker as `start`, in premine mode (the seed comes from the chain).
++        let (worker_sender, worker_receiver) = unbounded::<MinerCommand>();
++        let (easy_complexity, hard_complexity) = self.complexity.get();
++        let worker = MinerWorker {
++            id: (js_sys::Math::random() * u64::MAX as f64) as u64,
++            sender: worker_sender,
++            status: MinerStatus::Queued,
++            contract: self.contract.clone(),
++            app_id: self.app_id.clone(),
++            keys: self.keys.clone(),
++            seed: String::new(),
++            duration_ms: duration_ms as u64,
++            easy_complexity,
++            hard_complexity,
++            send_contract: self.send_contract.clone(),
++            policy: self.policy.clone(),
++            dropped: self.dropped.clone(),
++            premine: true,
++            in_flight_seed,
++            premine_release: self.premine_release.clone(),
++            premine_discard: self.premine_discard.clone(),
++        };
++
++        let seeds_ref = self.seeds.clone();
++        let workers_ref = self.workers.clone();
++        workers_ref.borrow_mut().push(worker.clone());
++
++        wasm_bindgen_futures::spawn_local(worker::run(
++            worker,
++            worker_receiver,
++            seeds_ref,
++            workers_ref,
++            callback,
++        ));
++
++        Ok(())
++    }
++
++    /// NewGoblin premine: lets the premine worker submit as soon as no other worker is left
++    /// (safe to call early). `false` if there is no premine worker queued, mining or held.
++    #[wasm_bindgen(js_name = release_submit)]
++    pub fn release_submit(&self) -> bool {
++        let pending = self.premine_pending();
++        if pending {
++            self.premine_release.set(true);
++        }
++        pending
++    }
++
++    /// NewGoblin premine: ends the premine worker quietly (`status_updated` `removed`, seed null,
++    /// not corrupted): nothing sent, no seed or chain touched. `false` if there is no premine
++    /// worker queued, mining or held (one already submitting is not discarded).
++    #[wasm_bindgen(js_name = discard_premine)]
++    pub fn discard_premine(&self) -> bool {
++        let pending = self.premine_pending();
++        if pending {
++            self.premine_discard.set(true);
++        }
++        pending
++    }
+ }
+ 
+ impl Miner {
+-    /// NewGoblin §E.6: any worker that is queued, mining or submitting blocks a new start.
++    /// NewGoblin §E.6: any worker that is queued, mining, held (premine) or submitting blocks a
++    /// new start.
+     fn is_busy(&self) -> bool {
++        premine::busy(&self.statuses())
++    }
++
++    /// NewGoblin premine: the status of every worker.
++    fn statuses(&self) -> Vec<MinerStatus> {
++        self.workers.borrow().iter().map(|w| w.status.clone()).collect()
++    }
++
++    /// NewGoblin premine: a premine worker that has not started submitting.
++    fn premine_pending(&self) -> bool {
+         self.workers.borrow().iter().any(|w| {
+-            matches!(
+-                w.status,
+-                MinerStatus::Queued | MinerStatus::Computing | MinerStatus::Submitting
+-            )
++            w.premine
++                && matches!(
++                    w.status,
++                    MinerStatus::Queued | MinerStatus::Computing | MinerStatus::Held
++                )
+         })
+     }
+ }
+diff --git a/bee_miner/src/wasm/mod.rs b/bee_miner/src/wasm/mod.rs
+index c21dfa0..82eb381 100644
+--- a/bee_miner/src/wasm/mod.rs
++++ b/bee_miner/src/wasm/mod.rs
+@@ -15,6 +15,8 @@ use wasm_bindgen::JsError;
+ mod delivery;
+ pub mod keys;
+ pub mod miner;
++// NewGoblin 0002: premine mode (the next session mined ahead, held until JS releases it).
++mod premine;
+ pub mod worker;
+ 
+ /// NewGoblin §E.4: ids of the miner events already dispatched (bounded).
+diff --git a/bee_miner/src/wasm/premine.rs b/bee_miner/src/wasm/premine.rs
+new file mode 100644
+index 0000000..b41ec8a
+--- /dev/null
++++ b/bee_miner/src/wasm/premine.rs
+@@ -0,0 +1,151 @@
++//! NewGoblin patch 0002 (premine), design
++//! `docs/superpowers/specs/2026-10-31-pipelined-sessions-design.md` §1.
++//!
++//! While one session (A, in flight) is being delivered, a premine worker (B) mines the session
++//! after it and holds it until JS releases or discards it. Only one session can be mined ahead:
++//! the seed after `_seedNext` is drawn by the contract when `_seed` rotates.
++
++use crate::wasm::worker::MinerStatus;
++use crate::wasm::worker::SessionState;
++
++/// Which seed of the contract a premine session is mined on.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) enum PremineBasis {
++    /// `_seedNext`: the in-flight session has not ended on chain yet.
++    Next,
++    /// `_seed`: the in-flight session already ended on chain (accepted or cancelled).
++    Current,
++}
++
++impl PremineBasis {
++    pub fn name(&self) -> &'static str {
++        match self {
++            PremineBasis::Next => "next",
++            PremineBasis::Current => "current",
++        }
++    }
++}
++
++/// Seed and complexity a premine session is mined with.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct PremineTarget {
++    pub seed: String,
++    pub easy: u32,
++    pub hard: u32,
++    pub basis: PremineBasis,
++}
++
++/// Seed and complexity for a session mined while the one on `in_flight_seed` is delivered,
++/// without cancelling anything. `_seed = _seedNext` both when a session is accepted (`Old` takes
++/// `_*Complexity`) and on `cancelCommitData` (`Old` unchanged), see `session_complexity.rs`.
++/// - `_seed` is still the in-flight seed: mine `_seedNext`. Valid for both outcomes only while
++///   `_*Complexity == _*ComplexityOld`; otherwise `Err("complexity_unstable: ...")`.
++/// - `_seed` already rotated (the in-flight session ended on chain): mine `_seed` with `Old`, as
++///   a sequential session would.
++pub(crate) fn resolve_premine(
++    state: &SessionState,
++    in_flight_seed: &str,
++) -> Result<PremineTarget, String> {
++    let current = (state.easy_complexity, state.hard_complexity);
++    let old = (state.easy_complexity_old, state.hard_complexity_old);
++    if state.seed != in_flight_seed {
++        let (easy, hard) = old;
++        return Ok(PremineTarget {
++            seed: state.seed.clone(),
++            easy,
++            hard,
++            basis: PremineBasis::Current,
++        });
++    }
++    if current != old {
++        return Err(format!("complexity_unstable: current {current:?} != old {old:?}"));
++    }
++    let (easy, hard) = current;
++    Ok(PremineTarget { seed: state.seed_next.clone(), easy, hard, basis: PremineBasis::Next })
++}
++
++/// Any worker that is not finished (queued, mining, held or submitting) blocks `start`.
++pub(crate) fn busy(statuses: &[MinerStatus]) -> bool {
++    statuses.iter().any(|s| *s != MinerStatus::Finished)
++}
++
++/// A premine needs exactly one live worker, and that one is submitting.
++pub(crate) fn can_premine(statuses: &[MinerStatus]) -> bool {
++    let mut live = statuses.iter().filter(|s| **s != MinerStatus::Finished);
++    live.next() == Some(&MinerStatus::Submitting) && live.next().is_none()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn state(current: (u32, u32), old: (u32, u32)) -> SessionState {
++        SessionState {
++            seed: "0xA".into(),
++            seed_next: "0xB".into(),
++            easy_complexity: current.0,
++            hard_complexity: current.1,
++            easy_complexity_old: old.0,
++            hard_complexity_old: old.1,
++            commit_data: None,
++            commit_interval: None,
++            taps_size: 0,
++            mbi_cur: None,
++            epoch_5m_start: 0,
++        }
++    }
++
++    #[test]
++    fn premine_on_next_seed_when_in_flight_and_complexity_stable() {
++        let st = state((10, 12), (10, 12));
++        assert_eq!(
++            resolve_premine(&st, "0xA"),
++            Ok(PremineTarget { seed: "0xB".into(), easy: 10, hard: 12, basis: PremineBasis::Next })
++        );
++    }
++
++    #[test]
++    fn premine_unsafe_when_complexity_changed_and_in_flight() {
++        let st = state((10, 13), (10, 12));
++        assert!(resolve_premine(&st, "0xA").unwrap_err().starts_with("complexity_unstable"));
++    }
++
++    #[test]
++    fn premine_on_current_seed_with_old_complexity_when_in_flight_finished() {
++        // the chain already rotated past the in-flight session's seed
++        let st = state((10, 13), (10, 12));
++        assert_eq!(
++            resolve_premine(&st, "0xZ"),
++            Ok(PremineTarget {
++                seed: "0xA".into(),
++                easy: 10,
++                hard: 12,
++                basis: PremineBasis::Current
++            })
++        );
++    }
++
++    #[test]
++    fn can_premine_only_with_a_single_submitting_worker() {
++        use MinerStatus::*;
++        assert!(!can_premine(&[]));
++        assert!(can_premine(&[Submitting]));
++        assert!(can_premine(&[Submitting, Finished]));
++        assert!(!can_premine(&[Submitting, Held]));
++        assert!(!can_premine(&[Submitting, Computing]));
++        assert!(!can_premine(&[Submitting, Queued]));
++        assert!(!can_premine(&[Computing]));
++        assert!(!can_premine(&[Held]));
++    }
++
++    #[test]
++    fn busy_includes_held() {
++        use MinerStatus::*;
++        assert!(busy(&[Held]));
++        assert!(busy(&[Submitting]));
++        assert!(busy(&[Queued]));
++        assert!(busy(&[Computing]));
++        assert!(!busy(&[Finished]));
++        assert!(!busy(&[]));
++    }
++}
+diff --git a/bee_miner/src/wasm/worker.rs b/bee_miner/src/wasm/worker.rs
+index 558126e..23193f3 100644
+--- a/bee_miner/src/wasm/worker.rs
++++ b/bee_miner/src/wasm/worker.rs
+@@ -46,6 +46,7 @@ use crate::wasm::delivery::now_ms;
+ use crate::wasm::delivery::DeliveryErr;
+ use crate::wasm::delivery::DeliveryOk;
+ use crate::wasm::delivery::SubmitPolicy;
++use crate::wasm::premine::resolve_premine;
+ use crate::wasm::DecodedSessionStatusData;
+ 
+ /// `MAX_LEN_TAPS` (mvsystem modifiers.sol:73): `setCommitData` requires `_tapsSize <= 10`.
+@@ -73,6 +74,8 @@ pub(crate) enum MinerCommand {
+ pub(crate) enum MinerStatus {
+     Queued,
+     Computing,
++    /// NewGoblin premine: mined, waiting for `release_submit()` and for the in-flight session.
++    Held,
+     Submitting,
+     Finished,
+ }
+@@ -82,6 +85,7 @@ impl Display for MinerStatus {
+         let s = match self {
+             MinerStatus::Queued => "queued",
+             MinerStatus::Computing => "computing",
++            MinerStatus::Held => "held", // NewGoblin premine
+             MinerStatus::Submitting => "submitting",
+             MinerStatus::Finished => "finished",
+         };
+@@ -129,6 +133,22 @@ pub(crate) struct MinerWorker {
+     /// NewGoblin: set when JS frees the Miner. Its workers keep running, so they check it
+     /// before preparing or sending anything and end quietly.
+     pub dropped: Rc<Cell<bool>>,
++    /// NewGoblin premine: mines the session after the one in flight and holds it until JS
++    /// releases it; it never calls `resolve_session` (see `run`).
++    pub premine: bool,
++    /// NewGoblin premine: resolved seed of the submitting worker when `premine()` was called.
++    pub in_flight_seed: String,
++    /// NewGoblin premine: `release_submit()` / `discard_premine()`, shared with the Miner.
++    pub premine_release: Rc<Cell<bool>>,
++    pub premine_discard: Rc<Cell<bool>>,
++}
++
++impl MinerWorker {
++    /// NewGoblin premine: a premine worker ends quietly, sending nothing, once it is discarded
++    /// from JS or the Miner is freed.
++    fn premine_ended(&self) -> bool {
++        self.premine && (self.premine_discard.get() || self.dropped.get())
++    }
+ }
+ 
+ // ---- NewGoblin W8: miner contract state relevant to a session ------------------------------
+@@ -347,7 +367,18 @@ pub(crate) async fn run(
+     // will verify against; never fall back silently to the "current" complexity.
+     let queued_seed = worker.seed.clone();
+     let mut diag = SessionDiag::default();
+-    match resolve_session(&worker, &workers_ref, &callback).await {
++    // NewGoblin premine: never `resolve_session`, which cancels any commit it finds (here, the
++    // live commit of the session in flight).
++    let resolved = if worker.premine {
++        let Some(found) = resolve_premine_session(&worker, &callback).await else {
++            shutdown_worker(&worker, &workers_ref, false, false, &callback);
++            return;
++        };
++        Ok(found)
++    } else {
++        resolve_session(&worker, &workers_ref, &callback).await
++    };
++    match resolved {
+         Ok((seed, easy, hard, source)) => {
+             seeds_ref.borrow_mut().retain(|s| s != &seed);
+             worker.seed = seed;
+@@ -370,6 +401,8 @@ pub(crate) async fn run(
+             return;
+         }
+     }
++    // NewGoblin premine: the shared entry gets the resolved seed too (`premine()` reads it).
++    update_worker_session(&worker, &workers_ref);
+     let (easy_complexity, hard_complexity) = (worker.easy_complexity, worker.hard_complexity);
+     diag.seed = worker.seed.clone();
+     diag.easy_complexity = easy_complexity;
+@@ -382,6 +415,12 @@ pub(crate) async fn run(
+     // Start computation loop
+     let start_ms = js_sys::Date::now() as u64;
+     loop {
++        // NewGoblin premine: discarded from JS or the Miner was freed: end quietly.
++        if worker.premine_ended() {
++            shutdown_worker(&worker, &workers_ref, false, false, &callback);
++            return;
++        }
++
+         // Process incoming command and calculate hashes
+         let now_ms = js_sys::Date::now() as u64;
+         match worker_receiver.try_next() {
+@@ -430,6 +469,12 @@ pub(crate) async fn run(
+         return;
+     }
+ 
++    // NewGoblin premine: held until released, then the same path as a normal session.
++    let taps = tap_tree.leaves.len();
++    if worker.premine && !hold_premine(&worker, &workers_ref, &callback, taps).await {
++        return;
++    }
++
+     // Wait if there is any worker with status `Submitting`
+     loop {
+         if workers_ref.borrow().iter().any(|w| w.status == MinerStatus::Submitting) {
+@@ -765,6 +810,16 @@ fn update_worker_status(
+     }
+ }
+ 
++/// NewGoblin premine: copies the resolved seed and complexity of `run`'s local worker into its
++/// shared entry.
++fn update_worker_session(worker: &MinerWorker, workers_ref: &Rc<RefCell<Vec<MinerWorker>>>) {
++    if let Some(w) = workers_ref.borrow_mut().iter_mut().find(|w| w.id == worker.id) {
++        w.seed = worker.seed.clone();
++        w.easy_complexity = worker.easy_complexity;
++        w.hard_complexity = worker.hard_complexity;
++    }
++}
++
+ fn shutdown_worker(
+     worker: &MinerWorker,
+     workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
+@@ -826,6 +881,108 @@ async fn resolve_session(
+     Ok((state.seed, easy, hard, source))
+ }
+ 
++/// NewGoblin premine: seed and complexity of the session after the one in flight
++/// (`resolve_premine`), read without cancelling anything. `None` = do not mine: the state is
++/// unreadable (`complexity_unknown`, as `resolve_session`) or premining is unsafe
++/// (`premine_unsafe`).
++async fn resolve_premine_session(
++    worker: &MinerWorker,
++    callback: &js_sys::Function,
++) -> Option<(String, u32, u32, &'static str)> {
++    let state = match read_session_state_retry(&worker.contract).await {
++        Ok(state) => state,
++        Err(message) => {
++            send_callback(
++                callback,
++                CallbackData::data(
++                    "complexity_unknown",
++                    Some(json!({"worker_id": worker.id, "message": message})),
++                ),
++            );
++            return None;
++        }
++    };
++    match resolve_premine(&state, &worker.in_flight_seed) {
++        Ok(target) => {
++            send_callback(
++                callback,
++                CallbackData::data(
++                    "premine_resolved",
++                    Some(json!({
++                        "worker_id": worker.id,
++                        "seed": target.seed,
++                        "basis": target.basis.name(),
++                        "complexity": [target.easy, target.hard],
++                    })),
++                ),
++            );
++            let old = (state.easy_complexity_old, state.hard_complexity_old);
++            let source = if (target.easy, target.hard) == old { "old" } else { "current" };
++            Some((target.seed, target.easy, target.hard, source))
++        }
++        Err(reason) => {
++            send_callback(
++                callback,
++                CallbackData::data(
++                    "premine_unsafe",
++                    Some(json!({"worker_id": worker.id, "reason": reason})),
++                ),
++            );
++            None
++        }
++    }
++}
++
++/// NewGoblin premine: `Held` until `release_submit()` was called and no other worker is left
++/// (the in-flight session was removed), checked every second. `false` = it ended quietly
++/// (discarded or the Miner was freed), nothing sent.
++async fn hold_premine(
++    worker: &MinerWorker,
++    workers_ref: &Rc<RefCell<Vec<MinerWorker>>>,
++    callback: &js_sys::Function,
++    taps: usize,
++) -> bool {
++    update_worker_status(worker.id, workers_ref, MinerStatus::Held);
++    send_callback(
++        callback,
++        CallbackData::data(
++            "status_updated",
++            Some(json!({"worker_id": worker.id, "status": MinerStatus::Held.to_string()})),
++        ),
++    );
++    send_callback(
++        callback,
++        CallbackData::data("premine_ready", Some(json!({"worker_id": worker.id, "taps": taps}))),
++    );
++    let held_at = now_ms();
++    while !worker.premine_ended() {
++        let alone = workers_ref
++            .borrow()
++            .iter()
++            .all(|w| w.id == worker.id || w.status == MinerStatus::Finished);
++        if worker.premine_release.get() && alone {
++            send_callback(
++                callback,
++                CallbackData::data(
++                    "premine_released",
++                    Some(json!({
++                        "worker_id": worker.id,
++                        "held_ms": now_ms().saturating_sub(held_at),
++                    })),
++                ),
++            );
++            // JS may discard it from that callback: it is still held, nothing sent.
++            if !worker.premine_ended() {
++                return true;
++            }
++            break;
++        }
++        gloo_timers::future::TimeoutFuture::new(1000).await;
++    }
++    shutdown_worker(worker, workers_ref, false, false, callback);
++    false
++}
++
+ async fn commit_is(worker: &MinerWorker, data_hex: &str) -> Result<bool, String> {
+     Ok(read_session_state(&worker.contract).await?.has_commit(data_hex))
+ }

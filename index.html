@@ -65,34 +65,6 @@
         text-transform: uppercase;
         color: var(--gold-dim);
       }
-      /* Stable / Beta switch */
-      .tabs {
-        display: flex;
-        justify-content: center;
-        gap: 8px;
-        margin: 0 0 22px;
-      }
-      .tab {
-        padding: 6px 18px;
-        border-radius: 6px;
-        border: 1px solid rgba(212, 165, 74, 0.35);
-        background: rgba(0, 0, 0, 0.25);
-        color: var(--gold-dim);
-        font-family: inherit;
-        font-size: 0.82rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        cursor: pointer;
-        transition: color 0.15s, border-color 0.15s, background 0.15s;
-      }
-      .tab:hover { color: var(--gold-light); border-color: var(--gold); }
-      .tab[aria-selected='true'] {
-        color: var(--brown-fill-low);
-        background: linear-gradient(180deg, var(--gold-light) 0%, var(--gold) 100%);
-        border-color: var(--gold-light);
-        font-weight: bold;
-      }
-      [role='tabpanel'][hidden] { display: none; }
       .btn {
         display: inline-block;
         box-sizing: border-box;
@@ -124,6 +96,13 @@
         color: var(--gold-dim);
         font-family: 'Courier New', monospace;
       }
+      .notice {
+        margin: -14px auto 22px;
+        max-width: 380px;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        color: var(--gold-light);
+      }
       .btn-android {
         background: linear-gradient(180deg, #1f6b4a 0%, #14402e 100%);
         border: 1px solid var(--gold);
@@ -135,15 +114,6 @@
         transform: translateY(-2px);
         box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(31, 107, 74, 0.8);
       }
-      .btn-ghost {
-        background: rgba(0, 0, 0, 0.25);
-        border: 1px solid rgba(212, 165, 74, 0.4);
-        color: var(--gold-light);
-        font-size: 0.8rem;
-        padding: 6px 14px;
-        margin: 4px 4px 0;
-      }
-      .btn-ghost:hover { border-color: var(--gold); transform: translateY(-1px); }
       details.note {
         margin: 8px auto 0;
         max-width: 380px;
@@ -168,47 +138,6 @@
         padding: 1px 5px;
         border-radius: 3px;
       }
-      /* Beta list */
-      .beta-intro {
-        margin: 0 0 16px;
-        font-size: 0.82rem;
-        line-height: 1.5;
-        color: var(--gold-dim);
-      }
-      .beta-card {
-        text-align: left;
-        margin: 0 0 12px;
-        padding: 12px 14px;
-        border-radius: 7px;
-        border: 1px solid rgba(212, 165, 74, 0.22);
-        background: rgba(0, 0, 0, 0.25);
-      }
-      .beta-card h3 {
-        margin: 0 0 2px;
-        font-size: 1rem;
-        color: var(--gold);
-        letter-spacing: 0.03em;
-      }
-      .beta-date {
-        font-size: 0.74rem;
-        font-family: 'Courier New', monospace;
-        color: var(--gold-dim);
-        margin-bottom: 6px;
-      }
-      .beta-notes {
-        margin: 0 0 10px;
-        font-size: 0.82rem;
-        line-height: 1.45;
-        color: var(--gold-dim);
-        white-space: pre-line;
-      }
-      .beta-empty {
-        padding: 18px 8px;
-        font-size: 0.84rem;
-        color: var(--gold-dim);
-        border: 1px dashed rgba(212, 165, 74, 0.25);
-        border-radius: 7px;
-      }
       footer {
         margin-top: 26px;
         font-size: 0.78rem;
@@ -228,24 +157,79 @@
       <h1>goblingames</h1>
       <p class="tagline">Acki Nacki blockchain mining</p>
 
-      <div class="tabs" role="tablist" aria-label="Release channel">
-        <button class="tab" id="tab-stable" role="tab" aria-selected="true" aria-controls="stable">Stable</button>
-        <button class="tab" id="tab-beta" role="tab" aria-selected="false" aria-controls="beta">Beta</button>
-      </div>
-
-      <!-- Stable: what every installed app is offered. -->
-      <section id="stable" role="tabpanel" aria-labelledby="tab-stable">
-        <a class="btn btn-download"
-           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-windows-setup.exe">
+      <!-- Stable downloads only (D6: the 1.x beta list stays in the site repo, unlinked).
+           Windows: the 2.x app, which updates itself from updates/windows/latest.json.
+           Android: the 2.x APK (arm64), a new app (app.goblingames.miner) with its own key.
+           Both files are published by the release (tools/site-release.mjs checks the links). -->
+      <section id="stable">
+        <a class="btn btn-download" href="downloads/goblingames_2.0.0_x64-setup.exe">
           ⬇ Download for Windows
         </a>
-        <p class="btn-meta">v1.4.0 · Windows 10/11 · ~26&nbsp;MB</p>
+        <p class="btn-meta">v2.0.0 · Windows 10/11 · new app</p>
+        <p class="notice">Coming from 1.x? Connect your wallets again: it takes a minute, and your NACKL are on the chain.</p>
 
-        <a class="btn btn-android"
-           href="https://github.com/andresCadavidT/goblingames/releases/latest/download/goblingames-android.apk">
+        <a class="btn btn-android" href="downloads/goblingames_2.0.0_arm64.apk">
           📱 Download for Android
         </a>
-        <p class="btn-meta">v1.4.0 · Android 7+ · ~58&nbsp;MB</p>
+        <p class="btn-meta">v2.0.0 · Android 8+ (64-bit) · ~12&nbsp;MB · new app</p>
+        <p class="notice">On Android it mines while the app is open and on screen: the screen stays on by itself, so leave the phone on the charger.</p>
+
+        <details class="note">
+          <summary>✨ What's new in 2.0.0</summary>
+          <p>
+            A new app, built on the official Bee Engine SDK. Up to 10 wallets in one
+            install, and taps are automatic. Each signed message is re-sent until it
+            lands, the next session is mined while the current one is delivered, and
+            rewards that are due are claimed before they expire.
+          </p>
+          <p>
+            It updates itself (<code>Install and restart</code>), keeps mining from the
+            tray when you close the window, and can start with Windows. No telemetry:
+            the log stays on your PC (<code>Save log (.txt)</code>).
+          </p>
+          <p>
+            On <strong>Android</strong> it is the same app: wallets, automatic taps and the
+            log (<code>Save log (.txt)</code>) work as on Windows. It mines while the app is
+            open and on screen. Later versions come as a new APK from this page, which
+            installs over 2.0.0.
+          </p>
+        </details>
+
+        <details class="note">
+          <summary>↻ Coming from goblingames 1.x on Windows?</summary>
+          <p>
+            1. In 1.x press <strong>Stop</strong> and leave it open for about 15 minutes,
+            so it claims what it has already earned.<br />
+            2. Run the 2.0.0 installer. It finds 1.x and offers
+            <code>Uninstall before installing</code>: keep that option, and 1.x is removed
+            before 2.0.0 goes into the same folder.<br />
+            3. Open 2.0.0 and connect your wallets again (QR code, then approve in AN Wallet).
+            It takes a minute, and your NACKL are on the chain.
+          </p>
+          <p>
+            A wallet mines on one device at a time: connecting it in 2.0.0 stops it in 1.x
+            on every other device, Android included.
+          </p>
+        </details>
+
+        <details class="note">
+          <summary>↻ Coming from goblingames 1.x on Android?</summary>
+          <p>
+            If you can, press <strong>Stop</strong> in 1.x and leave it open for about 15 minutes
+            before uninstalling, so it claims what it has already earned.
+          </p>
+          <p>
+            2.0.0 is a new app and does not replace 1.x. <strong>Uninstall 1.x first</strong>
+            (Settings → Apps → goblingames → Uninstall), so the two never mine at the same
+            time. Then install 2.0.0, open it and connect your wallets again
+            (<code>Add wallet</code> → <code>Open AN Wallet</code>, approve, and come back to
+            goblingames). It takes a minute, and your NACKL are on the chain.
+          </p>
+          <p>
+            A wallet mines on one device at a time: connecting it on the phone stops it on your
+            PC, and the other way round.
+          </p>
+        </details>
 
         <details class="note">
           <summary>⚠ "Unrecognized app" / "unknown sources"?</summary>
@@ -253,39 +237,11 @@
             That is normal — the app is not code-signed yet.
             On <strong>Windows</strong>: <code>More info</code> → <code>Run anyway</code>.
             On <strong>Android</strong>: allow <code>install unknown apps</code> for your
-            browser or Files, then tap the APK. Same file you downloaded here.
+            browser or Files, then tap the APK. If Play Protect offers to scan it,
+            <code>Install without scanning</code> is normal for apps from outside the Play
+            Store. Same file you downloaded here.
           </p>
         </details>
-
-        <details class="note">
-          <summary>🔋 Mining stops when the screen is off?</summary>
-          <p>
-            Android freezes background apps it is allowed to freeze, and a frozen
-            app cannot mine. Let goblingames run without battery restrictions:
-            <strong>Settings → Apps → goblingames → Battery → Unrestricted</strong>.
-          </p>
-          <p>
-            On some phones that is not enough — <strong>Xiaomi/Redmi, Infinix,
-            Tecno, ZTE, Oppo/Realme</strong> and friends need <strong>Autostart</strong>
-            enabled for the app as well (Settings → Apps → goblingames →
-            Autostart / "Start in background"). The app asks for the battery
-            permission once, and the mining panel shows a line with a button
-            while the restriction is on. A phone left restricted mines for about
-            an hour and then goes quiet until you touch it.
-          </p>
-        </details>
-      </section>
-
-      <!-- Beta: builds we are testing. Never offered by the app itself. -->
-      <section id="beta" role="tabpanel" aria-labelledby="tab-beta" hidden>
-        <p class="beta-intro">
-          Builds we are testing before they become stable. The app itself only
-          offers <em>stable</em> releases; each beta's notes are on its
-          <a href="https://github.com/andresCadavidT/goblingames/releases">GitHub release</a>.
-        </p>
-        <div id="beta-list">
-          <div class="beta-empty">Loading beta builds…</div>
-        </div>
       </section>
 
       <footer>
@@ -293,57 +249,9 @@
         <a href="https://github.com/andresCadavidT/goblingames/releases">All releases</a>
         ·
         <a href="https://github.com/andresCadavidT/goblingames">GitHub</a>
+        ·
+        <a href="https://github.com/andresCadavidT/goblingames/tree/main/source/bee-sdk-6.0.0-ng.3">Source code (AGPL)</a>
       </footer>
     </main>
-
-    <script>
-      // Stable / Beta tabs.
-      const tabs = [document.getElementById('tab-stable'), document.getElementById('tab-beta')];
-      const panels = [document.getElementById('stable'), document.getElementById('beta')];
-      function select(index) {
-        tabs.forEach((tab, i) => tab.setAttribute('aria-selected', String(i === index)));
-        panels.forEach((panel, i) => { panel.hidden = i !== index; });
-        if (index === 1) loadBetas();
-      }
-      tabs.forEach((tab, i) => tab.addEventListener('click', () => select(i)));
-
-      // Beta builds come from beta.json, which only this page reads. The app's
-      // updater reads version.json and therefore can never offer a beta.
-      let betasLoaded = false;
-      async function loadBetas() {
-        if (betasLoaded) return;
-        betasLoaded = true;
-        const list = document.getElementById('beta-list');
-        try {
-          const response = await fetch('beta.json', { cache: 'no-store' });
-          if (!response.ok) throw new Error(String(response.status));
-          const data = await response.json();
-          const builds = Array.isArray(data.builds) ? data.builds : [];
-          if (builds.length === 0) {
-            list.innerHTML = '<div class="beta-empty">No beta builds right now. The current release is stable.</div>';
-            return;
-          }
-          list.innerHTML = builds.map((build) => {
-            const windows = build.windows
-              ? `<a class="btn btn-ghost" href="${build.windows}">⬇ Windows</a>`
-              : '';
-            const android = build.android
-              ? `<a class="btn btn-ghost" href="${build.android}">📱 Android</a>`
-              : '';
-            const notes = build.notes
-              ? `<p class="beta-notes">${build.notes.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>`
-              : '';
-            return `<article class="beta-card">
-              <h3>v${build.version}</h3>
-              <div class="beta-date">${build.date || ''}${build.beta ? ' · beta' : ''}</div>
-              ${notes}
-              ${windows}${android}
-            </article>`;
-          }).join('');
-        } catch (error) {
-          list.innerHTML = '<div class="beta-empty">Could not load the beta list. Try again in a moment.</div>';
-        }
-      }
-    </script>
   </body>
 </html>

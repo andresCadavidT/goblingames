@@ -1,0 +1,4 @@
+{
+  "payload": "{\"issuedAt\":1793653587254,\"minAppVersion\":\"0.0.0\",\"latestAppVersion\":\"2.0.0\",\"downloads\":{\"windows\":\"https://goblingames.app/\"},\"sdkVersionExpected\":\"6.0.0-ng.3\",\"endpoints\":[\"https://mainnet.ackinacki.org\",\"https://mainnet-cf.ackinacki.org\"],\"miningEnabled\":true,\"autoTapEnabled\":true,\"pipeline\":true,\"burstMs\":130000,\"tapsPerEpoch\":70,\"maxSessionsPerEpoch\":10,\"submitMarginMs\":90000,\"maxParallel\":null,\"maxWallets\":10,\"retry\":{\"httpMs\":250,\"httpAfter429Ms\":1500,\"httpAttempts\":12,\"opMs\":1000,\"opAfter429Ms\":5000},\"submit\":{\"rootDeadlineMs\":210000,\"proofDeadlineMs\":240000,\"retryMinMs\":1000,\"retryMaxMs\":30000,\"epochBound\":false}}",
+  "signature": "qtxczEKILcD6A8lm91djkIe6wVow7FurNAk9HNouM6pvuy0yqv8PSZmTsUwKeNiZaixEGjnw1TF3lOYCdh9tBA=="
+}
