@@ -1,0 +1,57 @@
+{
+  "upstreamRepo": "https://github.com/gosh-sh/bee-engine",
+  "upstreamTag": "v6.0.0",
+  "upstreamCommit": "015bc466613e7b7c41f272dc16ba0cacbf0e4d93",
+  "patches": [
+    {
+      "name": "0001-newgoblin-delivery-and-diagnostics.patch",
+      "sha256": "ddfe28cc5c6ef88f7e7751e0f0e5107dfb9557fc6815a3b16ca6aea0a6dc60b0"
+    },
+    {
+      "name": "0002-newgoblin-premine.patch",
+      "sha256": "1588582418a7381786be7e683cfe1510e8b3a8a3bc76cc849c06f91f69f428ff"
+    },
+    {
+      "name": "0003-newgoblin-premine-chain-wait.patch",
+      "sha256": "a6538dcf0f8aa5a43ecef6be79e6552d32230042a5db5704584f7795f17f610c"
+    }
+  ],
+  "removedDependencies": [
+    "bee_wallet/Cargo.toml: dodex-sdk (dev-dependency, as upstream CI)"
+  ],
+  "cargoLock": {
+    "path": "patches/bee-sdk/Cargo.lock",
+    "sha256": "5475d5df319aafe8dafbe613f2cb381274d34017a2cdc69868a7ca736e02a7bd",
+    "mode": "reused",
+    "unpinnedGitDeps": [
+      "https://github.com/axiom-crypto/pse-poseidon.git (default branch) @ 19d3b09481bda0e95e7c005906365d070fceb752",
+      "https://github.com/gosh-sh/gosh-zk-snark-halo2-utils (branch main) @ fcc3ec73510ac61d62848e1fe59617acdbd5c00c",
+      "https://github.com/gosh-sh/halo2-axiom (branch main) @ 1f28ded628dbf5be7d0478d46cbda0cb0b158a29",
+      "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381 (branch bump-halo2-lib-v0.4.1) @ 026e176de8aff8269ab3bbb7f7192b247adab965",
+      "https://github.com/gosh-sh/poseidon-primitives (branch main) @ fb1450059deb4ae52b0dfdddcb9fdd6767ae1293",
+      "https://github.com/han0110/halo2-kzg-srs (default branch) @ d6929c74916f6be90751405a18df875ffcc0c241",
+      "https://github.com/tvmlabs/lockfree (default branch) @ c27a11d283cb106457087524123ec374bdfe62e0",
+      "https://github.com/tvmlabs/sodalite (default branch) @ 667f7f01290c95fdbeadc5bce3e32c1d14b92fe1"
+    ]
+  },
+  "lockResolvedAt": "2026-10-31T05:04:34Z",
+  "lockAudited": false,
+  "note": "Upstream gosh-sh/bee-engine commits no Cargo.lock: this lock was resolved by tools/bee-sdk/build.sh (cargo generate-lockfile = latest semver-compatible crates.io versions at resolvedAt, plus the branch-HEAD SHAs of git dependencies not pinned by rev), with the wasm-bindgen family pinned to the version of the npm 6.0.0 build. It is NOT the (unknown) graph upstream used for @teamgosh/bee-sdk 6.0.0 and has NOT been audited line by line. Built with rustc 1.98.1 (48a229cea 2026-09-01) (upstream's npm 6.0.0 build used rustc 1.99.0): the artifact is NOT byte-identical to @teamgosh/bee-sdk 6.0.0 (public API identical, see tools/bee-sdk/README.md).",
+  "wasmSha256": "80198fa4db7d60c70fdade990b1e80a00c1d7d23d7e0ad802f56ee9de82d0203",
+  "files": {
+    "LICENSE.md": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+    "NOTICE.md": "e96d99be45f33269f81cf41f97d80ce17dc1bbaa5c8f6b6b9c2dcf78f69f7316",
+    "README.md": "9334c6a7b0d5c1826b85fbb2492b775a5d19df60251cee6c9779cbc0b9ff122a",
+    "bee_sdk.d.ts": "4cf90e8c523a10316ffa001dfca4286fd8fe64d224edf9434884bbcecf6e30f2",
+    "bee_sdk.js": "d879189be2f8da31e6e642c11cf1c09404e0731be3ce695f53106f5e13a89d40",
+    "bee_sdk_bg.wasm": "80198fa4db7d60c70fdade990b1e80a00c1d7d23d7e0ad802f56ee9de82d0203",
+    "bee_sdk_bg.wasm.d.ts": "3631150121a6d40b1275747fc6a1949505a0b90cd649183e138c5c0da10acf5d",
+    "package.json": "75df6a9f78e8e153e4cc5dfe51483f0e61e92b4735d0349a4c0786f902921201"
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "wasmPack": "wasm-pack 0.15.1",
+  "wasmBindgen": "0.2.129",
+  "target": "wasm32-unknown-unknown",
+  "wasmPackArgs": "build --target web --release -- --locked",
+  "builtAt": "2026-11-01T11:49:03.039Z"
+}
