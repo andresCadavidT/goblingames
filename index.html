@@ -10,16 +10,28 @@
     <meta property="og:description" content="Mine Acki Nacki directly from your own PC. Free desktop miner." />
     <meta property="og:type" content="website" />
     <style>
+      /* Calma: the app's palette (apps/miner/src/styles.css). Graphite surfaces, the goblingames gold only as an
+         accent (title, links, section titles), running text in the system sans, no glow on text, nothing under 12 px. */
       :root {
+        color-scheme: dark;
         --gold: #d4a54a;
-        --gold-light: #f0d890;
-        --gold-dim: #a89060;
-        --brown-deep: #3d2817;
-        --brown-fill: #2a2018;
-        --brown-fill-low: #1a1410;
-        --green-deep: #1a3d2e;
-        --red: #8b2a1f;
-        --red-deep: #5a1a13;
+        --gold-light: #ecd9a6;
+        /* Secondary text: a neutral gray. */
+        --gold-dim: #adb2b8;
+        /* The card's border, the card, and the page's soft center. */
+        --brown-deep: #2c3035;
+        --brown-fill: #1c1f22;
+        --green-deep: #1b1e21;
+        --red: #8a3426;
+        --red-deep: #a6493a;
+        --green-btn: #2f6f53;
+        --green-btn-deep: #3f8a68;
+        --text: #e8e6e1;
+        --line: rgba(255, 255, 255, 0.1);
+        --line-soft: rgba(255, 255, 255, 0.06);
+        --box: #24272b;
+        --serif: Georgia, 'Times New Roman', serif;
+        --sans: 'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif;
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; padding: 0; }
@@ -29,19 +41,24 @@
         align-items: center;
         justify-content: center;
         padding: 24px 16px;
-        background: radial-gradient(ellipse at center, var(--green-deep) 0%, #0a1410 60%, #000 100%);
-        color: var(--gold-light);
-        font-family: Georgia, 'Times New Roman', serif;
+        background: radial-gradient(ellipse at center, var(--green-deep) 0%, #121416 70%) fixed #121416;
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.6;
+        overflow-wrap: break-word;
+      }
+      ::selection { background: rgba(212, 165, 74, 0.35); }
+      :focus-visible {
+        outline: 2px solid var(--gold);
+        outline-offset: 2px;
       }
       .panel {
         width: min(480px, 100%);
-        background: linear-gradient(180deg, var(--brown-fill) 0%, var(--brown-fill-low) 100%);
-        border: 2px solid var(--brown-deep);
+        background: var(--brown-fill);
+        border: 1px solid var(--brown-deep);
         border-radius: 10px;
-        box-shadow:
-          inset 0 0 30px rgba(0, 0, 0, 0.7),
-          0 0 30px rgba(212, 165, 74, 0.15),
-          0 10px 30px rgba(0, 0, 0, 0.6);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
         padding: 36px 32px 28px;
         text-align: center;
       }
@@ -49,80 +66,73 @@
         width: 96px;
         height: 96px;
         border-radius: 18px;
-        filter: drop-shadow(0 0 14px rgba(212, 165, 74, 0.5));
+        filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
       }
       h1 {
         margin: 14px 0 2px;
+        font-family: var(--serif);
         font-size: 2.4rem;
         letter-spacing: 0.04em;
         color: var(--gold);
-        text-shadow: 0 0 14px rgba(212, 165, 74, 0.55), 0 2px 4px rgba(0, 0, 0, 0.8);
       }
+      /* The brand's own line keeps its small capitals, at 12 px. */
       .tagline {
-        margin: 14px 0 18px;
-        font-size: 0.8rem;
-        letter-spacing: 0.28em;
+        margin: 12px 0 20px;
+        font-size: 0.75rem;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
         color: var(--gold-dim);
       }
       .btn {
         display: inline-block;
         box-sizing: border-box;
-        padding: 8px 18px;
+        padding: 9px 20px;
         margin: 0 0 10px;
+        border: 1px solid;
         border-radius: 7px;
         font-family: inherit;
-        font-size: 0.88rem;
+        font-size: 0.95rem;
         font-weight: bold;
-        letter-spacing: 0.04em;
+        letter-spacing: 0.01em;
         text-decoration: none;
         cursor: pointer;
         transition: transform 0.15s, box-shadow 0.2s;
       }
-      .btn-download {
-        background: linear-gradient(180deg, var(--red) 0%, var(--red-deep) 100%);
-        border: 1px solid var(--gold);
-        color: var(--gold-light);
-        text-shadow: 0 0 6px rgba(240, 216, 144, 0.5);
-        box-shadow: 0 0 14px rgba(139, 42, 31, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      .btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
       }
-      .btn-download:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(139, 42, 31, 0.8);
+      .btn-download {
+        background: var(--red);
+        border-color: var(--red-deep);
+        color: #fbf1ee;
+      }
+      .btn-android {
+        background: var(--green-btn);
+        border-color: var(--green-btn-deep);
+        color: #f3f6f4;
       }
       .btn-meta {
         margin: -4px 0 22px;
-        font-size: 0.78rem;
+        font-size: 0.8rem;
         color: var(--gold-dim);
-        font-family: 'Courier New', monospace;
       }
       .notice {
         margin: -14px auto 22px;
         max-width: 380px;
-        font-size: 0.82rem;
-        line-height: 1.45;
-        color: var(--gold-light);
-      }
-      .btn-android {
-        background: linear-gradient(180deg, #1f6b4a 0%, #14402e 100%);
-        border: 1px solid var(--gold);
-        color: var(--gold-light);
-        text-shadow: 0 0 6px rgba(240, 216, 144, 0.5);
-        box-shadow: 0 0 14px rgba(26, 61, 46, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-      }
-      .btn-android:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 0 22px rgba(212, 165, 74, 0.6), 0 0 14px rgba(31, 107, 74, 0.8);
+        font-size: 0.9rem;
+        line-height: 1.5;
+        color: var(--text);
       }
       details.note {
         margin: 8px auto 0;
         max-width: 380px;
         text-align: left;
-        font-size: 0.82rem;
-        color: var(--gold-dim);
-        background: rgba(0, 0, 0, 0.22);
-        border: 1px solid rgba(212, 165, 74, 0.18);
-        border-radius: 6px;
+        font-size: 0.9rem;
+        color: var(--text);
+        background: var(--box);
+        border: 1px solid var(--line);
+        border-radius: 7px;
         padding: 8px 12px;
       }
       details.note summary {
@@ -131,16 +141,18 @@
         list-style: none;
       }
       details.note summary::-webkit-details-marker { display: none; }
-      details.note p { margin: 8px 0 0; line-height: 1.5; }
+      details.note p { margin: 8px 0 0; line-height: 1.6; }
       details.note code {
+        font-family: inherit;
+        font-size: 0.95em;
         color: var(--gold-light);
-        background: rgba(212, 165, 74, 0.1);
+        background: var(--line-soft);
         padding: 1px 5px;
         border-radius: 3px;
       }
       footer {
         margin-top: 26px;
-        font-size: 0.78rem;
+        font-size: 0.8rem;
         color: var(--gold-dim);
       }
       footer a { color: var(--gold); text-decoration: none; }
